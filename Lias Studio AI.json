@@ -1,0 +1,946 @@
+{
+  "name": "Enhanced Bilingual AI Chatbot System (Refactored)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-chat-webhook",
+        "responseMode": "responseNode",
+        "options": {
+          "rawBody": false,
+          "allowedOrigins": "{{ $env.ALLOWED_ORIGINS }}"
+        }
+      },
+      "name": "Master Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "executeOn": "main",
+      "webhookId": "{{ generateUuid() }}",
+      "position": [
+        200,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Security Validator: Sanitizes input and performs basic security checks.\n// Uses a simpler UUID generation as 'crypto' module might not be available in n8n Code nodes.\n\nconst inputData = $input.first().json;\nconst body = inputData.body || {};\n\nconst sqlInjectionPattern = /(\\'|(\\\\-\\\\-)|(;)|(\\\\||\\\\||)|(\\\\*|\\\\*)|(%7C))/i;\nconst dosPattern = /(.{1000,})/; \n\nif (!body.message || typeof body.message !== 'string') {\n  throw new Error('Validation Error: Invalid or missing message field');\n}\n\n// Basic security checks\nif (sqlInjectionPattern.test(body.message) || dosPattern.test(body.message)) {\n  throw new Error('Security validation failed: Potentially malicious input detected.');\n}\n\n// Sanitize message: Remove HTML tags, limit length, and escape basic characters.\nconst sanitizedMessage = body.message\n  .trim()\n  .substring(0, 1000) // Limit message length to prevent excessively long prompts\n  .replace(/[<>&\"']/g, (match) => {\n    const escapeMap = {'<': '&lt;', '>': '&gt;', '&': '&amp;', '\"': '&quot;', \"'\": '&#x27;'};\n    return escapeMap[match];\n  });\n\n// Generate a simple UUID if crypto.randomUUID is not available\nfunction generateSimpleUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c == 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\n// Simple hash for message content (non-cryptographic, for identification/caching)\nfunction simpleHash(data) {\n    if (!data) return null;\n    let hash = 0;\n    for (let i = 0; i < data.length; i++) {\n        const char = data.charCodeAt(i);\n        hash = ((hash << 5) - hash) + char;\n        hash |= 0; // Convert to 32bit integer\n    }\n    return Math.abs(hash).toString(16); // Returns a simple hex string\n}\n\n// Use existing session ID or generate a new one\nconst sessionId = body.sessionId || generateSimpleUUID();\n\n// Generate a hash for the message using the new simpleHash function\nconst messageHash = simpleHash(sanitizedMessage + sessionId); \n\n// Determine language based on input, default to 'pt'\nconst language = ['pt', 'en'].includes(body.language) ? body.language : 'pt';\n\nconst validatedData = {\n  message: sanitizedMessage,\n  language: language,\n  sessionId: sessionId,\n  messageHash: messageHash,\n  timestamp: new Date().toISOString(),\n  userAgent: inputData.headers?.['user-agent'] || 'unknown',\n  ip: inputData.headers?.['x-forwarded-for'] || inputData.headers?.['x-real-ip'] || 'unknown'\n};\n\nreturn [{ json: validatedData }];"
+      },
+      "name": "Security Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Advanced Language Detection: Detects PT-PT or EN using patterns and assigns confidence.\n// All sensitive data is hashed for GDPR compliance using simple string hashing.\n\nconst userMessage = $json.message;\nconst userAgent = $json.userAgent;\nconst clientIP = $json.ip;\nconst sessionId = $json.sessionId;\n\n// GDPR-compliant hashing (simple, non-cryptographic hash for n8n Code Node compatibility)\nfunction hashData(data) {\n  if (!data) return null;\n  let hash = 0;\n  for (let i = 0; i < data.length; i++) {\n      const char = data.charCodeAt(i);\n      hash = ((hash << 5) - hash) + char;\n      hash |= 0; // Convert to 32bit integer\n  }\n  return Math.abs(hash).toString(16); // Returns a simple hex string\n}\n\n// Portuguese language patterns\nconst portuguesePatterns = [\n  /\\b(olá|oi|bom\\s+dia|boa\\s+tarde|boa\\s+noite)\\b/i,\n  /\\b(obrigad[oa]|desculp[ae]|por\\s+favor)\\b/i,\n  /\\b(agendar|marcar|reunião|encontro|consulta)\\b/i,\n  /\\b(sim|não|talvez|claro|certamente)\\b/i,\n  /\\b(como\\s+está|tudo\\s+bem|que\\s+tal)\\b/i,\n  /\\b(empresa|negócio|serviço|produto)\\b/i,\n  /[àáâãçéêíóôõú]/i\n];\n\n// English language patterns\nconst englishPatterns = [\n  /\\b(hello|hi|good\\s+morning|good\\s+afternoon|good\\s+evening)\\b/i,\n  /\\b(thank\\s+you|thanks|sorry|please)\\b/i,\n  /\\b(schedule|book|appointment|meeting|consultation)\\b/i,\n  /\\b(yes|no|maybe|sure|certainly)\\b/i,\n  /\\b(how\\s+are\\s+you|how's\\s+it\\s+going|what's\\s+up)\\b/i,\n  /\\b(company|business|service|product)\\b/i\n];\n\n// Calculate language confidence\nfunction detectLanguage(message) {\n  const ptMatches = portuguesePatterns.reduce((count, pattern) => {\n    return count + (pattern.test(message) ? 1 : 0);\n  }, 0);\n  \n  const enMatches = englishPatterns.reduce((count, pattern) => {\n    return count + (pattern.test(message) ? 1 : 0);\n  }, 0);\n  \n  // Check for Portuguese characters for stronger PT signal\n  const hasPortugueseChars = /[àáâãçéêíóôõú]/i.test(message);\n  \n  let language = 'en'; // Default to English if no strong signal\n  let confidence = 0.5;\n  \n  if (ptMatches > enMatches || (ptMatches > 0 && hasPortugueseChars)) {\n    language = 'pt';\n    confidence = Math.min(0.95, 0.5 + (ptMatches * 0.1) + (hasPortugueseChars ? 0.2 : 0));\n  } else if (enMatches > ptMatches) {\n    language = 'en';\n    confidence = Math.min(0.95, 0.5 + (enMatches * 0.1));\n  }\n  \n  return { language, confidence };\n}\n\nconst detection = detectLanguage(userMessage);\nconst timestamp = new Date().toISOString();\n\n// Hash sensitive data for GDPR compliance\nconst hashedIP = hashData(clientIP);\nconst hashedUserAgent = hashData(userAgent);\n\n// Pass through original language if provided in session for persistence\nconst sessionLanguage = $json.language || detection.language;\n\nreturn [{\n  json: {\n    originalMessage: userMessage,\n    sanitizedMessage: userMessage, // Renamed to message for consistency after security validator\n    detectedLanguage: detection.language,\n    confidence: detection.confidence,\n    sessionId,\n    timestamp,\n    hashedIP,\n    hashedUserAgent,\n    sessionLanguage: sessionLanguage // Carries through the preferred session language\n  }\n}];"
+      },
+      "name": "Language Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        600,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": [
+          {
+            "value1": "={{ $json.sanitizedMessage }}",
+            "operator": "isNotEmpty"
+          }
+        ]
+      },
+      "name": "Cache Check Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        800,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/company_knowledge?language=eq.{{ $json.detectedLanguage }}&active=eq.true&order=priority.asc&limit=50",
+        "options": {
+          "timeout": 10000,
+          "response": { "neverError": true }
+        },
+        "headers": {
+          "Authorization": "Bearer {{ $env.SUPABASE_SERVICE_KEY }}",
+          "apikey": "{{ $env.SUPABASE_SERVICE_KEY }}",
+          "Content-Type": "application/json"
+        }
+      },
+      "name": "Knowledge Base Fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1600,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations?session_id=eq.{{ $json.sessionId }}&order=created_at.desc&limit=5",
+        "options": {
+          "timeout": 5000,
+          "response": { "neverError": true }
+        },
+        "headers": {
+          "Authorization": "Bearer {{ $env.SUPABASE_SERVICE_KEY }}",
+          "apikey": "{{ $env.SUPABASE_SERVICE_KEY }}",
+          "Content-Type": "application/json"
+        }
+      },
+      "name": "Conversation History Fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1800,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Llama3.2 AI Processor: Builds a bilingual system prompt with company context and conversation history.\n\nconst { \n  sanitizedMessage, \n  detectedLanguage, \n  sessionId, \n  cacheKey \n} = $input.first().json;\n\n// Access knowledge base and conversation history from previous HTTP Request nodes\nconst knowledgeBaseResponse = $input.item(1).json.body || [];\nconst conversationHistoryResponse = $input.item(2).json.body || [];\n\n// Build context from knowledge base (filtering by language)\nfunction buildKnowledgeContext(kb, lang) {\n  if (!Array.isArray(kb) || kb.length === 0) return '';\n  \n  const relevantKB = kb.filter(item => \n    item.language === lang || item.language === 'both' || !item.language // Include if language matches or is generic/both\n  ).slice(0, 10); // Limit to top 10 relevant entries\n  \n  return relevantKB.map(item => \n    `Q: ${item.question_pt || item.question_en || item.title}\\nA: ${item.answer_pt || item.answer_en || item.content}`\n  ).join('\\n\\n');\n}\n\n// Build conversation context from history\nfunction buildConversationContext(history) {\n  if (!Array.isArray(history) || history.length === 0) return '';\n  \n  // Reverse to get most recent first, then take up to 3 turns\n  return history.slice(0, 3).reverse().map(msg => \n    `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.message}`\n  ).join('\\n');\n}\n\n// Enhanced system prompts based on the document\nconst systemPrompts = {\n  pt: `Você é um assistente de IA bilíngue profissional e amigável para uma startup de IA.\nResponda em português (PT-PT) de forma concisa (máximo 150 palavras), profissional mas acessível.\n\nDiretrizes:\n- Seja útil, preciso e honesto\n- Se não souber algo, admita e ofereça alternativas\n- Para agendamentos, extraia NOME, EMAIL, DATA, HORA e o TIPO DE SERVIÇO do utilizador e responda APENAS com o seguinte formato JSON: {\"appointment_details\": {\"name\": \"<nome>\", \"email\": \"<email>\", \"date\": \"<AAAA-MM-DD>\", \"time\": \"<HH:MM>\", \"type\": \"<tipo>\", \"notes\": \"<notas>\"}}. Para outras questões, responda normalmente em português (PT-PT).\n\nContexto da empresa:\n{{ KNOWLEDGE_CONTEXT }}\n\nHistórico da conversa:\n{{ CONVERSATION_CONTEXT }}\n\nResponda à seguinte mensagem do utilizador:`,\n  \n  en: `You are a professional and friendly bilingual AI assistant for an AI startup.\nRespond in English concisely (max 150 words), professional yet approachable.\n\nGuidelines:\n- Be helpful, accurate, and honest\n- If unsure, admit it and offer alternatives\n- For appointments, extract NAME, EMAIL, DATE, TIME, and SERVICE TYPE from the user and respond ONLY with the following JSON format: {\"appointment_details\": {\"name\": \"<name>\", \"email\": \"<email>\", \"date\": \"<YYYY-MM-DD>\", \"time\": \"<HH:MM>\", \"type\": \"<type>\", \"notes\": \"<notes>\"}}. For all other queries, respond normally in English.\n\nCompany context:\n{{ KNOWLEDGE_CONTEXT }}\n\nConversation history:\n{{ CONVERSATION_CONTEXT }}\n\nRespond to the following user message:`\n};\n\n// Build final prompt with context and history\nconst knowledgeContext = buildKnowledgeContext(knowledgeBaseResponse, detectedLanguage);\nconst conversationContext = buildConversationContext(conversationHistoryResponse);\n\nconst systemPrompt = systemPrompts[detectedLanguage]\n  .replace('{{ KNOWLEDGE_CONTEXT }}', knowledgeContext || 'No specific company information available.')\n  .replace('{{ CONVERSATION_CONTEXT }}', conversationContext || 'No previous conversation.');\n\nconst fullPrompt = `${systemPrompt}\\n\\nUser: ${sanitizedMessage}`;\n\n// Prepare API request body for Ollama (Llama3.2)\nconst requestBody = {\n  model: process.env.LLAMA_MODEL || 'llama3.2:latest',\n  messages: [\n    {\n      role: 'system',\n      content: systemPrompt\n    },\n    {\n      role: 'user',\n      content: sanitizedMessage\n    }\n  ],\n  stream: false,\n  options: {\n    temperature: 0.7,\n    max_tokens: 500,\n    top_p: 0.9,\n    stop: ['User:', 'Assistant:', 'Human:'] // Stop generation at these markers\n  }\n};\n\nreturn [{\n  json: {\n    ...$json,\n    aiRequest: requestBody,\n    hasKnowledge: knowledgeBaseResponse.length > 0,\n    hasHistory: conversationHistoryResponse.length > 0,\n    fullPrompt // Include full prompt for debugging/logging\n  }\n}];"
+      },
+      "name": "Llama3.2 AI Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.OLLAMA_URL || 'http://localhost:11434' }}/api/chat",
+        "options": {
+          "timeout": 30000,
+          "retry": {
+            "enabled": true,
+            "maxTries": 3,
+            "maxTimeout": 60000
+          },
+          "response": { "neverError": true }
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={{ $json.aiRequest }}"
+      },
+      "name": "Llama API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2200,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": [
+          {
+            "value1": "={{ $json.statusCode }}",
+            "operator": "notEqual",
+            "value2": 200
+          }
+        ]
+      },
+      "name": "AI Error Checker",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// GDPR Error Handler: Provides multilingual fallback responses and prepares admin notifications.\n\nconst previousData = $input.first().json;\nconst { detectedLanguage, sessionId, originalMessage, statusCode, statusText, body } = previousData;\n\n// Attempt to get a more specific error message from the body\nlet errorDetail = body?.error || body?.message || 'Unknown API Error';\n\nconst error = `HTTP Error ${statusCode}: ${statusText}. Detail: ${errorDetail}`;\n\n// Comprehensive fallback responses in both languages\nconst fallbackResponses = {\n  pt: [\n    'Peço desculpa, mas estou com dificuldades técnicas neste momento. Pode tentar novamente em alguns minutos?',\n    'Lamento, mas não consegui processar o seu pedido. Por favor, tente reformular a sua mensagem.',\n    'Estou temporariamente indisponível. Por favor, contacte-nos diretamente se for urgente.',\n    'Ocorreu um erro técnico. A nossa equipa foi notificada e iremos resolver brevemente.'\n  ],\n  en: [\n    'I apologize, but I am experiencing technical difficulties at the moment. Could you try again in a few minutes?',\n    'Sorry, I could not process your request. Please try rephrasing your message.',\n    'I am temporarily unavailable. Please contact us directly if this is urgent.',\n    'A technical error occurred. Our team has been notified and will resolve this shortly.'\n  ]\n};\n\n// Select appropriate fallback response based on detected language\nconst responses = fallbackResponses[detectedLanguage] || fallbackResponses['en'];\nconst fallbackResponse = responses[Math.floor(Math.random() * responses.length)];\n\n// Generate a simple UUID for error tracking\nfunction generateSimpleUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c == 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\nconst errorId = generateSimpleUUID();\n\n// Enhanced error context for monitoring (without sensitive user data)\nconst errorContext = {\n  timestamp: new Date().toISOString(),\n  sessionId,\n  language: detectedLanguage,\n  messageLength: originalMessage?.length || 0,\n  errorType: `AI_API_CALL_FAILED_${statusCode}`,\n  errorDetail: error,\n  userAgent: previousData.hashedUserAgent || 'unknown',\n  errorId: errorId\n};\n\nconsole.error('AI Chatbot Error:', JSON.stringify(errorContext, null, 2));\n\nreturn [{\n  json: {\n    response: fallbackResponse,\n    language: detectedLanguage,\n    sessionId,\n    isError: true,\n    errorHandled: true,\n    timestamp: new Date().toISOString(),\n    errorContext\n  }\n}];"
+      },
+      "name": "GDPR Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "toEmail": "={{ $env.ADMIN_EMAIL }}",
+        "fromEmail": "={{ $env.SMTP_FROM_EMAIL }}",
+        "subject": "🚨 Critical AI Chatbot Error - ID: {{ $json.errorContext.errorId }}",
+        "text": "Critical error occurred in AI Chatbot System:\\n\\nError ID: {{ $json.errorContext.errorId }}\\nTimestamp: {{ $json.errorContext.timestamp }}\\nSession ID: {{ $json.errorContext.sessionId }}\\nLanguage: {{ $json.errorContext.language }}\\nError Type: {{ $json.errorContext.errorType }}\\nError Detail: {{ $json.errorContext.errorDetail }}\\nUser Agent Hash: {{ $json.errorContext.userAgent }}\\n\\nPlease investigate immediately.\\n\\nThis is an automated alert from the AI Chatbot monitoring system.",
+        "options": {
+          "priority": "high"
+        }
+      },
+      "name": "Critical Error Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "credentials": {
+        "smtp": {
+          "id": "smtpCreds",
+          "name": "SMTP Account"
+        }
+      },
+      "position": [
+        2800,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Process AI Response: Extracts AI message, caches it, and detects appointment intent.\n// Also prepares data for saving user and AI messages to Supabase.\n\nconst previousData = $input.first().json;\nconst aiResponseData = previousData.body; // Full response from Ollama API\n\n// Extract AI response content\nconst aiResponseContent = aiResponseData?.message?.content || aiResponseData?.response || '';\nconst { detectedLanguage, sessionId, cacheKey, originalMessage, messageHash } = previousData;\n\n// Clean up AI response: Remove leading roles (e.g., 'Assistant:'), newlines followed by roles\nconst cleanResponse = aiResponseContent\n  .replace(/^(Assistant:|AI:|Bot:)\\s*/i, '') // Remove prefixes like 'Assistant:'\n  .replace(/\\n\\s*(User:|Human:)/i, '') // Remove trailing user prompts\n  .trim();\n\n// Enhanced intent detection for appointment scheduling (checks both original message and AI response)\nconst appointmentKeywords = {\n  pt: /\\b(agendar|marcar|reunião|encontro|consulta|hora\\s+marcada|data\\s+disponível|criar\\s+evento)\\b/i,\n  en: /\\b(schedule|book|appointment|meeting|consultation|available\\s+time|book\\s+slot|create\\s+event)\\b/i\n};\n\n// Check if AI response is in the expected JSON format for appointments\nlet hasAppointmentIntent = false;\nlet appointmentData = null;\n\ntry {\n  const parsedResponse = JSON.parse(cleanResponse);\n  if (parsedResponse.appointment_details) {\n    appointmentData = parsedResponse.appointment_details;\n    hasAppointmentIntent = true;\n  }\n} catch (e) {\n  // Not a JSON response, proceed with keyword detection\n}\n\n// Fallback keyword detection if not JSON or if JSON didn't contain appointment_details\nif (!hasAppointmentIntent) {\n    hasAppointmentIntent = \n      appointmentKeywords.pt.test(originalMessage) ||\n      appointmentKeywords.en.test(originalMessage) ||\n      appointmentKeywords.pt.test(cleanResponse) ||\n      appointmentKeywords.en.test(cleanResponse);\n}\n\nreturn [{\n  json: {\n    ...previousData,\n    response: cleanResponse,\n    hasAppointmentIntent: hasAppointmentIntent,\n    appointmentData: appointmentData, // Will be null if not detected as JSON appointment\n    fromCache: false, // This node processes new AI responses, so not from cache here\n    timestamp: new Date().toISOString(),\n    confidence: aiResponseData?.message?.confidence || previousData.confidence || 0.8,\n    messageHash: messageHash\n  }\n}];"
+      },
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2600,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations",
+        "options": {
+          "timeout": 5000,
+          "headers": {
+            "Prefer": "return=minimal"
+          }
+        },
+        "headers": {
+          "Authorization": "Bearer {{ $env.SUPABASE_SERVICE_KEY }}",
+          "apikey": "{{ $env.SUPABASE_SERVICE_KEY }}",
+          "Content-Type": "application/json"
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"session_id\": \"{{ $json.sessionId }}\",\n  \"role\": \"user\",\n  \"message\": \"{{ $json.originalMessage }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\",\n  \"message_hash\": \"{{ $json.messageHash || '' }}\",\n  \"created_at\": \"{{ $json.timestamp }}\"\n}"
+      },
+      "name": "Save User Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2800,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": [
+          {
+            "value1": "={{ $json.hasAppointmentIntent }}",
+            "operator": "equals",
+            "value2": true
+          }
+        ]
+      },
+      "name": "Intent Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3000,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enhanced Appointment Extractor: Extracts detailed appointment info using comprehensive regex.\n// This is an advanced extraction node combining user message and AI response.\n\nconst { originalMessage, response, detectedLanguage, sessionId } = $json;\nconst textToParse = `${originalMessage} ${response}`.toLowerCase();\n\n// Comprehensive regex patterns for extracting appointment information\nconst patterns = {\n  email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g,\n  phone: /(?:\\+351|00351|351)?\\s*[0-9]{2,3}\\s*[0-9]{3}\\s*[0-9]{3,4}|[0-9]{9}/g,\n  \n  names: {\n    pt: /(?:meu nome é|sou o|sou a|chamo-me|nome:?)\\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+(?:\\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+)*)/gi,\n    en: /(?:my name is|i am|i'm|name:?)\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)/gi\n  },\n  \n  dates: {\n    pt: /(?:dia|data|em)\\s*(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})|(?:próxima|próximo)\\s+(segunda|terça|quarta|quinta|sexta|segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira)/gi,\n    en: /(?:on|date)\\s*(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})|(?:next)\\s+(monday|tuesday|wednesday|thursday|friday)/gi\n  },\n  \n  times: {\n    pt: /(?:às|hora|horas)\\s*(\\d{1,2})(?:[:h](\\d{2}))?\\s*(?:da\\s+)?(manhã|tarde|manha|noite)?/gi, // Added noite\n    en: /(?:at)\\s*(\\d{1,2})(?:[:.](\\d{2}))?\\s*(am|pm|AM|PM)?/gi\n  },\n  \n  services: {\n    pt: /(?:consulta|reunião|meeting|sessão|serviço|tipo)\\s+(?:de\\s+)?(\\w+)/gi,\n    en: /(?:consultation|meeting|session|service|type)\\s+(?:for\\s+)?(\\w+)/gi\n  }\n};\n\n// Extraction helper functions\nconst extractAll = (text, pattern) => {\n  const matches = [];\n  let match;\n  while ((match = pattern.exec(text)) !== null) {\n    matches.push(match[1] || match[0]); // Capture group 1 or full match\n  }\n  return [...new Set(matches)]; // Return unique matches\n};\n\nconst extractNames = (text, lang) => {\n  const pattern = patterns.names[lang] || patterns.names.en;\n  const matches = [];\n  let match;\n  while ((match = pattern.exec(text)) !== null) {\n    if (match[1]) matches.push(match[1].trim());\n  }\n  return [...new Set(matches)];\n};\n\nconst extractDates = (text, lang) => {\n  const pattern = patterns.dates[lang] || patterns.dates.en;\n  const matches = [];\n  let match;\n  while ((match = pattern.exec(text)) !== null) {\n    if (match[1] && match[2] && match[3]) {\n      // DD/MM/YYYY or DD-MM-YYYY\n      const year = parseInt(match[3]) < 100 ? 2000 + parseInt(match[3]) : parseInt(match[3]);\n      matches.push(`${year}-${match[2].padStart(2, '0')}-${match[1].padStart(2, '0')}`);\n    } else if (match[4]) {\n      // Day of week (e.g., \"next monday\") - requires further processing for exact date\n      matches.push(match[4].toLowerCase());\n    }\n  }\n  return [...new Set(matches)];\n};\n\nconst extractTimes = (text, lang) => {\n  const pattern = patterns.times[lang] || patterns.times.en;\n  const matches = [];\n  let match;\n  while ((match = pattern.exec(text)) !== null) {\n    let hour = parseInt(match[1]);\n    const minute = match[2] ? parseInt(match[2]) : 0;\n    const period = match[3] ? match[3].toLowerCase() : '';\n\n    if (period === 'pm' && hour < 12) hour += 12; // Convert to 24-hour format\n    if (period === 'am' && hour === 12) hour = 0; // 12 AM is 00:00\n    if (period === 'manha' && hour >= 12) hour -= 12; // Adjust for morning\n    if (period === 'tarde' && hour < 12) hour += 12; // Adjust for afternoon\n    if (period === 'noite' && hour < 12) hour += 12; // Adjust for evening\n\n    matches.push(`${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`);\n  }\n  return [...new Set(matches)];\n};\n\n// Perform extraction\nconst emails = extractAll(textToParse, patterns.email);\nconst phones = extractAll(textToParse, patterns.phone);\nconst names = extractNames(textToParse, detectedLanguage);\nconst dates = extractDates(textToParse, detectedLanguage); //YYYY-MM-DD or day of week\nconst times = extractTimes(textToParse, detectedLanguage); // HH:MM (24-hour)\nconst services = extractAll(textToParse, patterns.services[detectedLanguage] || patterns.services.en);\n\n// Prioritize appointment data from AI JSON if available\nlet appointmentData = $json.appointmentData || {};\nappointmentData.name = appointmentData.name || (names.length > 0 ? names[0] : null);\nappointmentData.email = appointmentData.email || (emails.length > 0 ? emails[0] : null);\nappointmentData.type = appointmentData.type || (services.length > 0 ? services[0] : 'general');\nappointmentData.date = appointmentData.date || (dates.length > 0 ? dates[0] : null);\nappointmentData.time = appointmentData.time || (times.length > 0 ? times[0] : null);\n\n// Validate if enough data was extracted\nconst hasValidData = !!appointmentData.name && !!appointmentData.email && !!appointmentData.date && !!appointmentData.time;\n\nreturn [{\n  json: {\n    ...$json,\n    extractedAppointmentDetails: {\n      name: appointmentData.name,\n      email: appointmentData.email,\n      type: appointmentData.type,\n      date: appointmentData.date,\n      time: appointmentData.time,\n      notes: appointmentData.notes || '', // From AI JSON, if any\n      language: detectedLanguage,\n      phones: phones.length > 0 ? phones[0] : null // Keep first phone if multiple\n    },\n    hasValidData: hasValidData,\n    rawExtractedData: { emails, phones, names, dates, times, services }\n  }\n}];"
+      },
+      "name": "Enhanced Appointment Extractor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": [
+          {
+            "value1": "={{ $json.hasValidData }}",
+            "operator": "equals",
+            "value2": true
+          }
+        ]
+      },
+      "name": "Appointment Data Validator",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        3400,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Nextcloud Calendar Creator: Prepares VEVENT data for Nextcloud Calendar API.\n// Uses btoa for Base64 encoding for compatibility. Handles Lisbon timezone.\n\nconst appointmentData = $json.extractedAppointmentDetails;\nconst { name, email, type, date, time, language } = appointmentData;\nconst sessionId = $json.sessionId;\n\n// Helper to generate a simple UUID for event IDs\nfunction generateSimpleUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c == 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\nconst eventId = `ai-appt-${generateSimpleUUID()}`;\n\n// Combine date and time for initial Date object. Handle potential nulls.\nconst datePart = date || new Date().toISOString().split('T')[0];\nconst timePart = time || '14:00'; // Default to 2 PM if time is missing\n\nlet eventDateTime = new Date(`${datePart}T${timePart}:00`);\n\n// --- Complex Timezone Handling for Europe/Lisbon --- \n// This is crucial for VEVENT DTSTART;TZID to be correct.\n// We parse the date/time string, then construct a new Date object assuming it's in the target timezone,\n// then get its UTC representation for VEVENT. \n\nconst targetTimeZone = 'Europe/Lisbon';\nconst options = { year: 'numeric', month: '2-digit', day: '2-digit',\n                  hour: '2-digit', minute: '2-digit', second: '2-digit',\n                  hourCycle: 'h23', timeZone: targetTimeZone };\n\n// Get parts of the date/time string formatted for Lisbon\nconst parts = new Intl.DateTimeFormat('en-CA', options).formatToParts(eventDateTime);\nconst year = parts.find(p => p.type === 'year')?.value;\nconst month = parts.find(p => p.type === 'month')?.value;\nconst day = parts.find(p => p.type === 'day')?.value;\nconst hour = parts.find(p => p.type === 'hour')?.value;\nconst minute = parts.find(p => p.type === 'minute')?.value;\nconst second = parts.find(p => p.type === 'second')?.value;\n\n// Construct a Date object that effectively IS the date/time in Lisbon's local time\nconst dateInLisbonString = `${year}-${month}-${day}T${hour}:${minute}:${second}`; \nconst dateInLisbon = new Date(dateInLisbonString);\n\n// Now, convert this Lisbon-local date to UTC for the VEVENT DTSTART/DTEND (which expects UTC with 'Z')\n// This requires manually adjusting for the *local* timezone offset to get the *true* UTC time.\nconst utcDateTime = new Date(dateInLisbon.getTime() - dateInLisbon.getTimezoneOffset() * 60000);\n\n// Event duration (default to 1 hour if not specified)\nconst startDateTime = utcDateTime; // This is the UTC date for DTSTART\nconst endDateTime = new Date(startDateTime.getTime() + 60 * 60 * 1000); // 1 hour later\n\n// Format dates for VEVENT (e.g., 20250607T100000Z)\nfunction formatVEventDate(date) {\n  return date.toISOString().replace(/[-:]/g, '').replace(/\\.\\d{3}/, ''); // Remove milliseconds and colons/hyphens\n}\n\n// Build event title and description\nconst eventTitle = language === 'pt' \n  ? `Agendamento: ${type} - ${name}`\n  : `Appointment: ${type} - ${name}`;\n\nconst eventDescription = language === 'pt'\n  ? `Agendamento via chatbot\\nTipo: ${type}\\nCliente: ${name}\\nEmail: ${email}\\nSessão: ${sessionId}\\nNotas: ${appointmentData.notes || 'N/A'}`\n  : `Appointment via chatbot\\nType: ${type}\\nClient: ${name}\\nEmail: ${email}\\nSession: ${sessionId}\\nNotes: ${appointmentData.notes || 'N/A'}`;\n\n// Build VEVENT (RFC 5545 compliant)\n// IMPORTANT: Ensure all \\n are escaped as \\\\n within the string for JSON transfer.\n// DTSTART and DTEND use TZID for timezone awareness instead of Z for UTC directly, and the time is local to that TZID.\nconst vevent = `BEGIN:VCALENDAR\\nVERSION:2.0\\nPRODID:-//AI Chatbot//Appointment Scheduler//EN\\nCALSCALE:GREGORIAN\\nMETHOD:PUBLISH\\nBEGIN:VTIMEZONE\\nTZID:Europe/Lisbon\\nBEGIN:DAYLIGHT\\nTZOFFSETFROM:+0000\\nTZOFFSETTO:+0100\\nTZNAME:WEST\\nDTSTART:19700329T010000\\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\\nEND:DAYLIGHT\\nBEGIN:STANDARD\\nTZOFFSETFROM:+0100\\nTZOFFSETTO:+0000\\nTZNAME:WET\\nDTSTART:19701025T020000\\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\\nEND:STANDARD\\nEND:VTIMEZONE\\nBEGIN:VEVENT\\nUID:${eventId}\\nDTSTAMP:${formatVEventDate(new Date())}\\nDTSTART;TZID=Europe/Lisbon:${formatVEventDate(new Date(startDateTime.getTime() + startDateTime.getTimezoneOffset() * 60000)).slice(0, -1)}\\nDTEND;TZID=Europe/Lisbon:${formatVEventDate(new Date(endDateTime.getTime() + endDateTime.getTimezoneOffset() * 60000)).slice(0, -1)}\\nSUMMARY:${eventTitle}\\nDESCRIPTION:${eventDescription.replace(/\\n/g, '\\\\n')}\\nLOCATION:Online/Office\\nSTATUS:CONFIRMED\\nCLASS:PUBLIC\\nTRANSP:OPAQUE\\n${email ? `ATTENDEE;CN=${name};RSVP=TRUE:mailto:${email}\\n` : ''}ORGANIZER;CN=AI Assistant:mailto:${process.env.BUSINESS_EMAIL || 'admin@company.com'}\\nCATEGORIES:AI-Generated,${type}\\nEND:VEVENT\\nEND:VCALENDAR`;\n\nreturn [{\n  json: {\n    ...$json,\n    vevent,\n    eventTitle,\n    eventDescription,\n    startDateTime: startDateTime.toISOString(),\n    endDateTime: endDateTime.toISOString(),\n    eventId,\n    calendarData: {\n      title: eventTitle,\n      start: startDateTime.toISOString(),\n      end: endDateTime.toISOString(),\n      description: eventDescription,\n      attendees: [email],\n      timezone: targetTimeZone,\n      type: type\n    }\n  }\n}];"
+      },
+      "name": "Nextcloud Calendar Creator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3600,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.NEXTCLOUD_URL }}/remote.php/dav/calendars/{{ $env.NEXTCLOUD_USER }}/business-appointments/{{ $json.eventId }}.ics",
+        "options": {
+          "timeout": 10000,
+          "response": { "neverError": true }
+        },
+        "headers": {
+          "Content-Type": "text/calendar; charset=utf-8",
+          "User-Agent": "AI-Chatbot-Scheduler/1.0"
+        },
+        "httpMethod": "PUT",
+        "sendBody": true,
+        "bodyContentType": "raw",
+        "body": "={{ $json.vevent }}"
+      },
+      "name": "Nextcloud Calendar API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "nextcloudAuth",
+          "name": "Nextcloud Basic Auth"
+        }
+      },
+      "position": [
+        3800,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"fromCache\": true\n}"
+      },
+      "name": "Cached Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1600,
+        550
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"error\": \"Message is empty\",\n  \"language\": \"en\",\n  \"timestamp\": \"{{ new Date().toISOString() }}\",\n  \"sessionId\": \"{{ $json.sessionId || 'unknown' }}\"\n}"
+      },
+      "name": "Empty Message Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        800,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"error\": true,\n  \"errorHandled\": true\n}"
+      },
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3000,
+        900
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 2 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Daily Maintenance Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enhanced GDPR-compliant daily maintenance preparation.\n// Uses a simpler UUID generation as 'crypto' module might not be available in n8n Code nodes.\n\n// Generate a simple UUID if crypto.randomUUID is not available\nfunction generateSimpleUUID() {\n  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {\n    const r = Math.random() * 16 | 0;\n    const v = c == 'x' ? r : (r & 0x3 | 0x8);\n    return v.toString(16);\n  });\n}\n\n// Calculate cleanup dates\nconst now = new Date();\nconst thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();\nconst ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();\n\n// Clear in-memory cache safely if it exists (for a truly persistent solution, this would be Redis CLEAR)\nif (typeof global !== 'undefined' && global.chatbotCache) {\n  global.chatbotCache.clear();\n  global.cacheTimestamps.clear();\n  console.log('In-memory cache cleared during maintenance.');\n}\n\n// Define maintenance tasks with enhanced metadata\nconst maintenanceTasks = {\n  conversationCleanup: {\n    table: 'conversations',\n    cutoffDate: thirtyDaysAgo,\n    description: 'Delete conversations older than 30 days (GDPR compliance)',\n    priority: 'high'\n  },\n  appointmentCleanup: {\n    table: 'appointments', \n    cutoffDate: ninetyDaysAgo,\n    description: 'Delete completed appointments older than 90 days',\n    priority: 'medium'\n  },\n  cacheCleanup: {\n    description: 'Clear in-memory cache and reset counters',\n    completed: true,\n    priority: 'low'\n  }\n};\n\nreturn [{\n  json: {\n    maintenanceTasks,\n    timestamp: now.toISOString(),\n    timezone: 'Europe/Lisbon',\n    maintenanceId: generateSimpleUUID(),\n    status: 'ready'\n  }\n}];"
+      },
+      "name": "Enhanced Maintenance Preparation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations?created_at=lt.{{ $json.maintenanceTasks.conversationCleanup.cutoffDate }}",
+        "options": {
+          "timeout": 30000,
+          "headers": {
+            "Prefer": "return=minimal"
+          },
+          "response": { "neverError": true }
+        },
+        "headers": {
+          "Authorization": "Bearer {{ $env.SUPABASE_SERVICE_KEY }}",
+          "apikey": "{{ $env.SUPABASE_SERVICE_KEY }}",
+          "Content-Type": "application/json"
+        },
+        "httpMethod": "DELETE"
+      },
+      "name": "Cleanup Old Conversations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        600,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointments?created_at=lt.{{ $json.maintenanceTasks.appointmentCleanup.cutoffDate }}",
+        "options": {
+          "timeout": 30000,
+          "headers": {
+            "Prefer": "return=minimal"
+          },
+          "response": { "neverError": true }
+        },
+        "headers": {
+          "Authorization": "Bearer {{ $env.SUPABASE_SERVICE_KEY }}",
+          "apikey": "{{ $env.SUPABASE_SERVICE_KEY }}",
+          "Content-Type": "application/json"
+        },
+        "httpMethod": "DELETE"
+      },
+      "name": "Cleanup Old Appointments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        800,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Enhanced Maintenance Report: Generates a summary report of daily maintenance tasks.\n\nconst maintenanceData = $input.first().json;\nconst conversationCleanupResult = $input.item(1).json;\nconst appointmentCleanupResult = $input.item(2).json;\n\n// Function to get task status based on HTTP response\nfunction getTaskStatus(result) {\n  if (result.error) return 'failed';\n  if (result.statusCode && result.statusCode >= 200 && result.statusCode < 300) return 'completed';\n  return 'unknown'; // Default if no clear success/fail\n}\n\n// Extract records affected from 'count' or 'body.count' if present\nfunction getRecordsAffected(result) {\n  return result.body?.count || result.count || 0;\n}\n\nconst report = {\n  maintenanceId: maintenanceData.maintenanceId,\n  timestamp: new Date().toISOString(),\n  timezone: maintenanceData.timezone,\n  duration: {\n    start: maintenanceData.timestamp,\n    end: new Date().toISOString()\n  },\n  tasks: {\n    conversationCleanup: {\n      status: getTaskStatus(conversationCleanupResult),\n      recordsAffected: getRecordsAffected(conversationCleanupResult),\n      error: conversationCleanupResult.error || conversationCleanupResult.body?.message || null,\n      cutoffDate: maintenanceData.maintenanceTasks.conversationCleanup.cutoffDate\n    },\n    appointmentCleanup: {\n      status: getTaskStatus(appointmentCleanupResult),\n      recordsAffected: getRecordsAffected(appointmentCleanupResult),\n      error: appointmentCleanupResult.error || appointmentCleanupResult.body?.message || null,\n      cutoffDate: maintenanceData.maintenanceTasks.appointmentCleanup.cutoffDate\n    },\n    cacheCleanup: {\n      status: 'completed',\n      description: 'In-memory cache cleared successfully'\n    }\n  },\n  summary: {\n    totalTasksScheduled: 3,\n    totalTasksCompleted: [\n      getTaskStatus(conversationCleanupResult) === 'completed' ? 1 : 0,\n      getTaskStatus(appointmentCleanupResult) === 'completed' ? 1 : 0,\n      1 // cache always succeeds as it's in-memory\n    ].reduce((a, b) => a + b, 0),\n    totalTasksFailed: [\n      getTaskStatus(conversationCleanupResult) === 'failed' ? 1 : 0,\n      getTaskStatus(appointmentCleanupResult) === 'failed' ? 1 : 0\n    ].reduce((a, b) => a + b, 0),\n    totalRecordsDeleted: getRecordsAffected(conversationCleanupResult) + getRecordsAffected(appointmentCleanupResult)\n  }\n};\n\n// Add overall status\nreport.overallStatus = report.summary.totalTasksFailed === 0 ? 'success' : 'partial_failure';\n\nreturn [{\n  json: report\n}];"
+      },
+      "name": "Enhanced Maintenance Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "toEmail": "={{ $env.ADMIN_EMAIL }}",
+        "fromEmail": "={{ $env.SMTP_FROM_EMAIL }}",
+        "subject": "{{ $json.overallStatus === 'success' ? '✅' : '⚠️' }} Daily Maintenance Report - AI Chatbot ({{ $json.maintenanceId }})",
+        "text": "Daily maintenance completed for AI Chatbot System:\\n\\n=== MAINTENANCE SUMMARY ===\\nMaintenance ID: {{ $json.maintenanceId }}\\nOverall Status: {{ $json.overallStatus }}\\nTimestamp: {{ $json.timestamp }}\\nTimezone: {{ $json.timezone }}\\nStart Time: {{ $json.duration.start }}\\nEnd Time: {{ $json.duration.end }}\\n\\n=== PERFORMANCE METRICS ===\\nTasks Scheduled: {{ $json.summary.totalTasksScheduled }}\\nTasks Completed: {{ $json.summary.totalTasksCompleted }}/{{ $json.summary.totalTasksScheduled }}\\nTasks Failed: {{ $json.summary.totalTasksFailed }}\\nTotal Records Deleted: {{ $json.summary.totalRecordsDeleted }}\\n\\n=== CONVERSATION CLEANUP ===\\nStatus: {{ $json.tasks.conversationCleanup.status }}\\nRecords Deleted: {{ $json.tasks.conversationCleanup.recordsAffected }}\\nCutoff Date: {{ $json.tasks.conversationCleanup.cutoffDate }}\\nError: {{ $json.tasks.conversationCleanup.error || 'None' }}\\n\\n=== APPOINTMENT CLEANUP ===\\nStatus: {{ $json.tasks.appointmentCleanup.status }}\\nRecords Deleted: {{ $json.tasks.appointmentCleanup.recordsAffected }}\\nCutoff Date: {{ $json.tasks.appointmentCleanup.cutoffDate }}\\nError: {{ $json.tasks.appointmentCleanup.error || 'None' }}\\n\\n=== CACHE CLEANUP ===\\nStatus: {{ $json.tasks.cacheCleanup.status }}\\nDescription: {{ $json.tasks.cacheCleanup.description }}\\n\\n---\\nThis is an automated report from the AI Chatbot maintenance system.\\nReport generated at: {{ $json.timestamp }}",
+        "options": {}
+      },
+      "name": "Enhanced Maintenance Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "credentials": {
+        "smtp": {
+          "id": "smtpCreds",
+          "name": "SMTP Account"
+        }
+      },
+      "position": [
+        1200,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "save-appointment-sub-workflow"
+      },
+      "name": "Execute Save Appointment Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 2,
+      "position": [
+        4000,
+        450
+      ]
+    },
+    {
+      "parameters": {
+        "workflowId": "save-ai-response-sub-workflow"
+      },
+      "name": "Execute Save AI Response Sub-Workflow",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        850
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const { sanitizedMessage, sessionId, messageHash } = $json;\n\n// Create a more robust cache key based on message hash or session ID + message\nconst cacheKey = `${sessionId}:${messageHash}`;\n\nreturn [{ json: { ...$json, cacheKey } }];"
+      },
+      "name": "Prepare Cache Key",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1000,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.REDIS_URL }}/get/{{ $json.cacheKey }}",
+        "options": {
+          "response": {
+            "neverError": true
+          }
+        },
+        "httpMethod": "GET"
+      },
+      "name": "Redis Cache Get",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "redisAuth",
+          "name": "Redis API Key"
+        }
+      },
+      "position": [
+        1200,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": [
+          {
+            "value1": "={{ $json.body.get }}",
+            "operator": "isNotEmpty"
+          }
+        ]
+      },
+      "name": "Is Cache Hit?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const cachedDataString = $json.body.get;\n\nlet responseData = {};\n\ntry {\n  responseData = JSON.parse(cachedDataString);\n} catch(e) {\n  // This should not happen if cache is set correctly, but handle gracefully\n  // In case of error, we can consider it a cache miss\n  // For this example, we'll just return an empty object to fail the next step.\n}\n\nreturn [{\n  json: {\n    response: responseData.response || '',\n    detectedLanguage: responseData.language || $json.detectedLanguage,\n    sessionId: responseData.sessionId || $json.sessionId,\n    timestamp: new Date().toISOString(),\n    fromCache: true\n  }\n}];"
+      },
+      "name": "Format Cached Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        650
+      ]
+    }
+  ],
+  "connections": {
+    "Master Webhook": {
+      "main": [
+        [
+          {
+            "node": "Security Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Validator": {
+      "main": [
+        [
+          {
+            "node": "Language Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Language Detection": {
+      "main": [
+        [
+          {
+            "node": "Cache Check Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Check Router": {
+      "main": [
+        [
+          {
+            "node": "Prepare Cache Key",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "else": [
+        [
+          {
+            "node": "Empty Message Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Knowledge Base Fetch": {
+      "main": [
+        [
+          {
+            "node": "Conversation History Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation History Fetch": {
+      "main": [
+        [
+          {
+            "node": "Llama3.2 AI Processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llama3.2 AI Processor": {
+      "main": [
+        [
+          {
+            "node": "Llama API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llama API Call": {
+      "main": [
+        [
+          {
+            "node": "AI Error Checker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Error Checker": {
+      "main": [
+        [
+          {
+            "node": "Process AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "else": [
+        [
+          {
+            "node": "GDPR Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GDPR Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Critical Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process AI Response": {
+      "main": [
+        [
+          {
+            "node": "Save User Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save User Message": {
+      "main": [
+        [
+          {
+            "node": "Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Router": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Appointment Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "else": [
+        [
+          {
+            "node": "Execute Save AI Response Sub-Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Appointment Extractor": {
+      "main": [
+        [
+          {
+            "node": "Appointment Data Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Appointment Data Validator": {
+      "main": [
+        [
+          {
+            "node": "Nextcloud Calendar Creator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "else": [
+        [
+          {
+            "node": "Execute Save AI Response Sub-Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nextcloud Calendar Creator": {
+      "main": [
+        [
+          {
+            "node": "Nextcloud Calendar API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nextcloud Calendar API": {
+      "main": [
+        [
+          {
+            "node": "Execute Save Appointment Sub-Workflow",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Maintenance Trigger": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Maintenance Preparation": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Conversations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Conversations": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Appointments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Appointments": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Maintenance Report": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Cache Key": {
+      "main": [
+        [
+          {
+            "node": "Redis Cache Get",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redis Cache Get": {
+      "main": [
+        [
+          {
+            "node": "Is Cache Hit?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is Cache Hit?": {
+      "main": [
+        [
+          {
+            "node": "Format Cached Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "else": [
+        [
+          {
+            "node": "Knowledge Base Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Cached Response": {
+      "main": [
+        [
+          {
+            "node": "Cached Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "id": "enhanced-bilingual-ai-chatbot-system-refactored-workflow",
+  "meta": {
+    "workflow": {
+      "tags": [
+        {
+          "id": "chatbot",
+          "name": "AI Chatbot"
+        },
+        {
+          "id": "production",
+          "name": "Production Ready"
+        },
+        {
+          "id": "gdpr",
+          "name": "GDPR Compliant"
+        },
+        {
+          "id": "bilingual",
+          "name": "Bilingual"
+        },
+        {
+          "id": "self-hosted",
+          "name": "Self-Hosted"
+        }
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Europe/Lisbon",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": {
+      "enabled": true
+    }
+  },
+  "staticData": {}
+}
