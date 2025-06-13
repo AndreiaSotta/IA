@@ -1,0 +1,1272 @@
+{
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "7a701534-7de4-4c5d-a2fc-53493f65b606",
+      "name": "Daily Maintenance Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -420,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-chat-webhook",
+        "responseMode": "responseNode",
+        "options": {
+          "allowedOrigins": "={{ $env.ALLOWED_ORIGINS }}",
+          "rawBody": "={{ false }}"
+        }
+      },
+      "id": "8ed4bb21-892c-4f31-b431-5a7df05e5254",
+      "name": "Master Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        -600,
+        200
+      ],
+      "webhookId": "1c0e787e-4b4c-4e5f-8cad-ca91af0aca27"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Advanced Language Detection with GDPR Compliance\nconst crypto = require('crypto');\n\n// Extract input data\nconst userMessage = $input.first().json.body?.message?.trim() || '';\nconst userAgent = $input.first().json.headers['user-agent'] || '';\nconst clientIP = $input.first().json.headers['x-forwarded-for'] || $input.first().json.headers['x-real-ip'] || 'unknown';\nconst sessionId = $input.first().json.body?.sessionId || crypto.randomUUID();\n\n// GDPR-compliant hashing\nfunction hashData(data) {\n  return crypto.createHash('sha256').update(data + process.env.HASH_SALT).digest('hex');\n}\n\n// Sanitize message (remove potential XSS, maintain Portuguese characters)\nfunction sanitizeMessage(msg) {\n  return msg.replace(/<[^>]*>/g, '').replace(/[^\\w\\s\\u00C0-\\u017F\\u0080-\\u024F\\u1E00-\\u1EFF.,!?-]/g, '').trim();\n}\n\n// Portuguese language patterns\nconst portuguesePatterns = [\n  /\\b(olá|oi|bom\\s+dia|boa\\s+tarde|boa\\s+noite)\\b/i,\n  /\\b(obrigad[oa]|desculp[ae]|por\\s+favor)\\b/i,\n  /\\b(agendar|marcar|reunião|encontro|consulta)\\b/i,\n  /\\b(sim|não|talvez|claro|certamente)\\b/i,\n  /\\b(como\\s+está|tudo\\s+bem|que\\s+tal)\\b/i,\n  /\\b(empresa|negócio|serviço|produto)\\b/i,\n  /[àáâãçéêíóôõú]/i\n];\n\n// English language patterns\nconst englishPatterns = [\n  /\\b(hello|hi|good\\s+morning|good\\s+afternoon|good\\s+evening)\\b/i,\n  /\\b(thank\\s+you|thanks|sorry|please)\\b/i,\n  /\\b(schedule|book|appointment|meeting|consultation)\\b/i,\n  /\\b(yes|no|maybe|sure|certainly)\\b/i,\n  /\\b(how\\s+are\\s+you|how's\\s+it\\s+going|what's\\s+up)\\b/i,\n  /\\b(company|business|service|product)\\b/i\n];\n\n// Calculate language confidence\nfunction detectLanguage(message) {\n  const ptMatches = portuguesePatterns.reduce((count, pattern) => {\n    return count + (pattern.test(message) ? 1 : 0);\n  }, 0);\n  \n  const enMatches = englishPatterns.reduce((count, pattern) => {\n    return count + (pattern.test(message) ? 1 : 0);\n  }, 0);\n  \n  // Check for Portuguese characters\n  const hasPortugueseChars = /[àáâãçéêíóôõú]/i.test(message);\n  \n  let language = 'en';\n  let confidence = 0.5;\n  \n  if (ptMatches > enMatches || hasPortugueseChars) {\n    language = 'pt';\n    confidence = Math.min(0.9, 0.5 + (ptMatches * 0.1) + (hasPortugueseChars ? 0.2 : 0));\n  } else if (enMatches > ptMatches) {\n    language = 'en';\n    confidence = Math.min(0.9, 0.5 + (enMatches * 0.1));\n  }\n  \n  return { language, confidence };\n}\n\n// Validate input\nif (!userMessage) {\n  return [{\n    json: {\n      error: 'Empty message',\n      language: 'en',\n      response: 'Please provide a message.',\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\nconst sanitizedMessage = sanitizeMessage(userMessage);\nconst detection = detectLanguage(sanitizedMessage);\nconst timestamp = new Date().toISOString();\n\n// Hash sensitive data for GDPR compliance\nconst hashedIP = hashData(clientIP);\nconst hashedUserAgent = hashData(userAgent);\n\nreturn [{\n  json: {\n    originalMessage: userMessage,\n    sanitizedMessage,\n    detectedLanguage: detection.language,\n    confidence: detection.confidence,\n    sessionId,\n    timestamp,\n    hashedIP,\n    hashedUserAgent,\n    messageLength: sanitizedMessage.length\n  }\n}];"
+      },
+      "id": "5b94c4bd-98bc-48ce-8ecf-92d7ed71a961",
+      "name": "Advanced Language Detection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.sanitizedMessage }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "30a3af13-bc10-4ee4-a51f-d92da066c89c",
+      "name": "Cache Check Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -20,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// In-Memory Cache Implementation with TTL and size limits\nclass SimpleCache {\n  constructor() {\n    if (!global.chatbotCache) {\n      global.chatbotCache = new Map();\n      global.cacheTimestamps = new Map();\n    }\n  }\n  \n  get(key) {\n    const now = Date.now();\n    const timestamp = global.cacheTimestamps.get(key);\n    \n    // Check if expired (10 minutes = 600000ms)\n    if (!timestamp || (now - timestamp) > 600000) {\n      this.delete(key);\n      return null;\n    }\n    \n    return global.chatbotCache.get(key);\n  }\n  \n  set(key, value) {\n    // Limit cache size to 1000 entries\n    if (global.chatbotCache.size >= 1000) {\n      const firstKey = global.chatbotCache.keys().next().value;\n      this.delete(firstKey);\n    }\n    \n    global.chatbotCache.set(key, value);\n    global.cacheTimestamps.set(key, Date.now());\n  }\n  \n  delete(key) {\n    global.chatbotCache.delete(key);\n    global.cacheTimestamps.delete(key);\n  }\n  \n  clear() {\n    global.chatbotCache.clear();\n    global.cacheTimestamps.clear();\n  }\n}\n\nconst cache = new SimpleCache();\nconst { sanitizedMessage, sessionId, detectedLanguage } = $input.first().json;\n\n// Create cache key\nconst cacheKey = `${sessionId}:${sanitizedMessage.toLowerCase().replace(/\\s+/g, '')}`;\n\n// Check cache\nconst cachedResponse = cache.get(cacheKey);\n\nif (cachedResponse) {\n  return [{\n    json: {\n      ...cachedResponse,\n      fromCache: true,\n      cacheKey,\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\n// Pass through if not cached\nreturn [{\n  json: {\n    ...$input.first().json,\n    cacheKey,\n    fromCache: false\n  }\n}];"
+      },
+      "id": "5989b29d-fd63-4014-93bd-911342da380e",
+      "name": "Cache Checker",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        180,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/company_knowledge?active=eq.true&order=priority.asc&limit=50",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "127c7bf3-d702-4dd1-9ca0-82be8f7ef361",
+      "name": "Knowledge Base Fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        380,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations?session_id=eq.{{ $json.sessionId }}&order=created_at.desc&limit=5",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "8017c895-ea47-4c3c-a39f-118bac606723",
+      "name": "Conversation History Fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        580,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Llama3.2 AI Processor with Enhanced Bilingual System Prompts\nconst { \n  sanitizedMessage, \n  detectedLanguage, \n  sessionId, \n  cacheKey \n} = $input.first().json;\n\nconst knowledgeBase = $input.item(1).json || [];\nconst conversationHistory = $input.item(2).json || [];\n\n// Build context from knowledge base\nfunction buildKnowledgeContext(kb, lang) {\n  if (!Array.isArray(kb) || kb.length === 0) return '';\n  \n  const relevantKB = kb.filter(item => \n    item.language === lang || item.language === 'both'\n  ).slice(0, 10);\n  \n  return relevantKB.map(item => \n    `${item.title || 'Info'}: ${item.content || item.description || ''}`\n  ).join('\\n');\n}\n\n// Build conversation context\nfunction buildConversationContext(history) {\n  if (!Array.isArray(history) || history.length === 0) return '';\n  \n  return history.slice(0, 3).reverse().map(msg => \n    `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.message}`\n  ).join('\\n');\n}\n\n// Enhanced system prompts\nconst systemPrompts = {\n  pt: `Você é um assistente de IA bilíngue profissional e amigável para uma startup de IA.\nResponda em português (PT-PT) de forma concisa (máximo 150 palavras), profissional mas acessível.\n\nDiretrizes:\n- Seja útil, preciso e honesto\n- Se não souber algo, admita e ofereça alternativas\n- Para agendamentos, extraia: nome, email, data, hora, tipo de serviço\n- Use informações da empresa quando relevante\n- Mantenha o tom profissional mas caloroso\n- Foque em soluções práticas e claras\n\nContexto da empresa:\n{{ KNOWLEDGE_CONTEXT }}\n\nHistórico da conversa:\n{{ CONVERSATION_CONTEXT }}\n\nResponda à seguinte mensagem do utilizador:`,\n  \n  en: `You are a professional and friendly bilingual AI assistant for an AI startup.\nRespond in English concisely (max 150 words), professional yet approachable.\n\nGuidelines:\n- Be helpful, accurate, and honest\n- If unsure, admit it and offer alternatives\n- For appointments, extract: name, email, date, time, service type\n- Use company information when relevant\n- Maintain professional but warm tone\n- Focus on practical and clear solutions\n\nCompany context:\n{{ KNOWLEDGE_CONTEXT }}\n\nConversation history:\n{{ CONVERSATION_CONTEXT }}\n\nRespond to the following user message:`\n};\n\n// Build final prompt\nconst knowledgeContext = buildKnowledgeContext(knowledgeBase, detectedLanguage);\nconst conversationContext = buildConversationContext(conversationHistory);\n\nconst systemPrompt = systemPrompts[detectedLanguage]\n  .replace('{{ KNOWLEDGE_CONTEXT }}', knowledgeContext || 'No specific company information available.')\n  .replace('{{ CONVERSATION_CONTEXT }}', conversationContext || 'No previous conversation.');\n\nconst fullPrompt = `${systemPrompt}\\n\\nUser: ${sanitizedMessage}`;\n\n// Prepare API request body for Ollama\nconst requestBody = {\n  model: process.env.LLAMA_MODEL || 'llama3.2:latest',\n  prompt: fullPrompt,\n  stream: false,\n  options: {\n    temperature: 0.7,\n    max_tokens: 500,\n    top_p: 0.9,\n    stop: ['User:', 'Assistant:', 'Human:']\n  }\n};\n\nreturn [{\n  json: {\n    requestBody,\n    systemPrompt,\n    knowledgeContext,\n    conversationContext,\n    detectedLanguage,\n    sessionId,\n    cacheKey,\n    originalMessage: sanitizedMessage,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "33debfb6-4b57-4018-a09b-c0353e3bb8e9",
+      "name": "Llama3.2 AI Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        780,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.LLAMA_URL || 'http://localhost:11434' }}/api/generate",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "c78e2b80-8335-4839-8dfb-5ecb84ae3110",
+      "name": "Llama API Call",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        980,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.error }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "exists"
+              }
+            }
+          ],
+          "combineOperation": "any"
+        },
+        "options": {}
+      },
+      "id": "bf192f29-fc32-4b2e-b582-8db423aa576a",
+      "name": "AI Error Checker",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process successful AI response and implement intelligent caching\nconst previousData = $input.first().json;\nconst response = $input.first().json;\n\n// Extract AI response from Llama output\nconst aiResponse = response.response || response.text || '';\nconst { detectedLanguage, sessionId, cacheKey, originalMessage } = previousData;\n\n// Clean up AI response\nconst cleanResponse = aiResponse\n  .replace(/^(Assistant:|AI:|Bot:)\\s*/i, '')\n  .replace(/\\n\\s*(User:|Human:)/i, '')\n  .trim();\n\n// Cache the response using the same cache system\nif (typeof global !== 'undefined' && global.chatbotCache && cacheKey) {\n  const cacheData = {\n    response: cleanResponse,\n    language: detectedLanguage,\n    sessionId,\n    originalMessage,\n    cachedAt: new Date().toISOString()\n  };\n  \n  global.chatbotCache.set(cacheKey, cacheData);\n  global.cacheTimestamps.set(cacheKey, Date.now());\n}\n\n// Enhanced intent detection for appointment scheduling\nconst appointmentKeywords = {\n  pt: /\\b(agendar|marcar|reunião|encontro|consulta|appointment|schedule|meeting|hora\\s+marcada|data\\s+disponível)\\b/i,\n  en: /\\b(schedule|book|appointment|meeting|consultation|agendar|marcar|available\\s+time|book\\s+slot)\\b/i\n};\n\nconst hasAppointmentIntent = \n  appointmentKeywords.pt.test(originalMessage) ||\n  appointmentKeywords.en.test(originalMessage) ||\n  appointmentKeywords.pt.test(cleanResponse) ||\n  appointmentKeywords.en.test(cleanResponse);\n\nreturn [{\n  json: {\n    response: cleanResponse,\n    language: detectedLanguage,\n    sessionId,\n    originalMessage,\n    hasAppointmentIntent,\n    fromCache: false,\n    timestamp: new Date().toISOString(),\n    confidence: response.confidence || 0.8,\n    messageHash: require('crypto').createHash('sha256').update(originalMessage + process.env.HASH_SALT).digest('hex')\n  }\n}];"
+      },
+      "id": "38618415-7121-44f9-8649-65faa38f7ed3",
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced GDPR-compliant error handler with multilingual fallback responses\nconst previousData = $input.first().json;\nconst { detectedLanguage, sessionId, originalMessage } = previousData;\nconst error = $input.first().json.error || 'Unknown error';\n\n// Comprehensive fallback responses in both languages\nconst fallbackResponses = {\n  pt: [\n    'Peço desculpa, mas estou com dificuldades técnicas neste momento. Pode tentar novamente em alguns minutos?',\n    'Lamento, mas não consegui processar o seu pedido. Por favor, tente reformular a sua mensagem.',\n    'Estou temporariamente indisponível. Por favor, contacte-nos diretamente se for urgente.',\n    'Ocorreu um erro técnico. A nossa equipa foi notificada e iremos resolver brevemente.'\n  ],\n  en: [\n    'I apologize, but I am experiencing technical difficulties at the moment. Could you try again in a few minutes?',\n    'Sorry, I could not process your request. Please try rephrasing your message.',\n    'I am temporarily unavailable. Please contact us directly if this is urgent.',\n    'A technical error occurred. Our team has been notified and will resolve this shortly.'\n  ]\n};\n\n// Select appropriate fallback\nconst responses = fallbackResponses[detectedLanguage] || fallbackResponses['en'];\nconst fallbackResponse = responses[Math.floor(Math.random() * responses.length)];\n\n// Enhanced error context for monitoring (without sensitive data)\nconst errorContext = {\n  timestamp: new Date().toISOString(),\n  sessionId,\n  language: detectedLanguage,\n  messageLength: originalMessage?.length || 0,\n  errorType: typeof error === 'object' ? error.name || 'Unknown' : 'String error',\n  userAgent: previousData.hashedUserAgent || 'unknown',\n  errorId: require('crypto').randomUUID()\n};\n\n// Log error for monitoring (sanitized)\nconsole.error('AI Chatbot Error:', {\n  errorId: errorContext.errorId,\n  timestamp: errorContext.timestamp,\n  sessionId: errorContext.sessionId,\n  language: errorContext.language,\n  errorType: errorContext.errorType\n});\n\nreturn [{\n  json: {\n    response: fallbackResponse,\n    language: detectedLanguage,\n    sessionId,\n    isError: true,\n    errorHandled: true,\n    timestamp: new Date().toISOString(),\n    errorContext\n  }\n}];"
+      },
+      "id": "6b2a8778-771d-4214-a036-a5e6e35b7c8b",
+      "name": "GDPR Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1400,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasAppointmentIntent }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d36c6b2b-9780-4471-a9f4-8a5792777723",
+      "name": "Intent Router",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1780,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced appointment details extraction with comprehensive validation\nconst { originalMessage, language, sessionId, response } = $input.first().json;\nconst text = `${originalMessage} ${response}`.toLowerCase();\n\n// Comprehensive regex patterns for extracting appointment information\nconst patterns = {\n  email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g,\n  phone: /(?:\\+351|00351|351)?\\s*[0-9]{2,3}\\s*[0-9]{3}\\s*[0-9]{3,4}|[0-9]{9}/g,\n  \n  // Enhanced name patterns\n  names: {\n    pt: /(?:meu nome é|sou o|sou a|chamo-me|nome:?)\\s+([A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+(?:\\s+[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ][a-záàâãéêíóôõúç]+)*)/gi,\n    en: /(?:my name is|i am|i'm|name:?)\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)/gi\n  },\n  \n  // Enhanced date patterns\n  dates: {\n    pt: /(?:dia|data|em)\\s*(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})|(?:próxima|próximo)\\s+(segunda|terça|quarta|quinta|sexta|segunda-feira|terça-feira|quarta-feira|quinta-feira|sexta-feira)/gi,\n    en: /(?:on|date)\\s*(\\d{1,2})[\\/-](\\d{1,2})[\\/-](\\d{2,4})|(?:next)\\s+(monday|tuesday|wednesday|thursday|friday)/gi\n  },\n  \n  // Enhanced time patterns\n  times: {\n    pt: /(?:às|hora|horas)\\s*(\\d{1,2})(?:[:h](\\d{2}))?\\s*(?:da\\s+)?(manhã|tarde|manha)/gi,\n    en: /(?:at)\\s*(\\d{1,2})(?:[:.](\\d{2}))?\\s*(am|pm|AM|PM)/gi\n  },\n  \n  // Service type patterns\n  services: {\n    pt: /(?:consulta|reunião|meeting|sessão|serviço)\\s+(?:de\\s+)?(\\w+)/gi,\n    en: /(?:consultation|meeting|session|service)\\s+(?:for\\s+)?(\\w+)/gi\n  }\n};\n\n// Extract information\nfunction extractEmails(text) {\n  const matches = text.match(patterns.email) || [];\n  return [...new Set(matches)];\n}\n\nfunction extractPhones(text) {\n  const matches = text.match(patterns.phone) || [];\n  return [...new Set(matches)];\n}\n\nfunction extractNames(text, lang) {\n  const pattern = patterns.names[lang] || patterns.names.en;\n  const matches = [];\n  let match;\n  \n  while ((match = pattern.exec(text)) !== null) {\n    matches.push(match[1].trim());\n  }\n  \n  return [...new Set(matches)];\n}\n\nfunction extractDates(text, lang) {\n  const pattern = patterns.dates[lang] || patterns.dates.en;\n  const matches = [];\n  let match;\n  \n  while ((match = pattern.exec(text)) !== null) {\n    if (match[1] && match[2] && match[3]) {\n      // Date format: DD/MM/YYYY\n      const day = parseInt(match[1]);\n      const month = parseInt(match[2]);\n      const year = parseInt(match[3]) < 100 ? 2000 + parseInt(match[3]) : parseInt(match[3]);\n      \n      if (day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2024) {\n        matches.push({ day, month, year, raw: match[0] });\n      }\n    } else if (match[4]) {\n      // Day of week\n      matches.push({ dayOfWeek: match[4], raw: match[0] });\n    }\n  }\n  \n  return matches;\n}\n\nfunction extractTimes(text, lang) {\n  const pattern = patterns.times[lang] || patterns.times.en;\n  const matches = [];\n  let match;\n  \n  while ((match = pattern.exec(text)) !== null) {\n    const hour = parseInt(match[1]);\n    const minute = match[2] ? parseInt(match[2]) : 0;\n    const period = match[3] || '';\n    \n    if (hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {\n      matches.push({ hour, minute, period, raw: match[0] });\n    }\n  }\n  \n  return matches;\n}\n\nfunction extractServices(text, lang) {\n  const pattern = patterns.services[lang] || patterns.services.en;\n  const matches = [];\n  let match;\n  \n  while ((match = pattern.exec(text)) !== null) {\n    matches.push(match[1]);\n  }\n  \n  return [...new Set(matches)];\n}\n\n// Extract all information\nconst emails = extractEmails(text);\nconst phones = extractPhones(text);\nconst names = extractNames(text, language);\nconst dates = extractDates(text, language);\nconst times = extractTimes(text, language);\nconst services = extractServices(text, language);\n\n// Determine appointment type\nlet appointmentType = 'general';\nif (services.length > 0) {\n  appointmentType = services[0];\n} else if (text.includes('consultation') || text.includes('consulta')) {\n  appointmentType = 'consultation';\n} else if (text.includes('meeting') || text.includes('reunião')) {\n  appointmentType = 'meeting';\n}\n\n// Generate suggested datetime (next business day at 14:00 if no specific time)\nfunction generateSuggestedDateTime() {\n  const now = new Date();\n  const suggested = new Date(now);\n  suggested.setDate(suggested.getDate() + 1);\n  \n  // Set to 14:00 (2 PM)\n  suggested.setHours(14, 0, 0, 0);\n  \n  // If it's weekend, move to next Monday\n  while (suggested.getDay() === 0 || suggested.getDay() === 6) {\n    suggested.setDate(suggested.getDate() + 1);\n  }\n  \n  return suggested;\n}\n\nconst suggestedDateTime = generateSuggestedDateTime();\n\nreturn [{\n  json: {\n    sessionId,\n    language,\n    originalMessage,\n    emails,\n    phones,\n    names,\n    dates,\n    times,\n    services,\n    appointmentType,\n    suggestedDateTime: suggestedDateTime.toISOString(),\n    extractedAt: new Date().toISOString(),\n    hasValidData: emails.length > 0 || names.length > 0,\n    extractionSummary: {\n      emailsFound: emails.length,\n      namesFound: names.length,\n      datesFound: dates.length,\n      timesFound: times.length,\n      servicesFound: services.length\n    }\n  }\n}];"
+      },
+      "id": "127895b9-ac57-46eb-a5a5-8e2ceae0c9f3",
+      "name": "Enhanced Appointment Extractor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2000,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasValidData }}",
+              "operation": "equal",
+              "value2": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "f4f54b16-9163-4c86-a84e-8208bdbc1cc5",
+      "name": "Appointment Data Validator",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced Nextcloud calendar event creation with proper VEVENT format\nconst appointmentData = $input.first().json;\nconst { \n  sessionId, language, emails, names, appointmentType, \n  suggestedDateTime, dates, times \n} = appointmentData;\n\n// Build event details\nconst attendeeName = names.length > 0 ? names[0] : 'Guest';\nconst attendeeEmail = emails.length > 0 ? emails[0] : '';\n\n// Determine event datetime\nlet eventDateTime = new Date(suggestedDateTime);\n\n// If specific date/time was extracted, use it\nif (dates.length > 0 && times.length > 0) {\n  const date = dates[0];\n  const time = times[0];\n  \n  if (date.day && date.month && date.year) {\n    eventDateTime = new Date(date.year, date.month - 1, date.day, time.hour, time.minute);\n  }\n}\n\n// Event duration (1 hour default)\nconst startDateTime = new Date(eventDateTime);\nconst endDateTime = new Date(eventDateTime.getTime() + 60 * 60 * 1000);\n\n// Format dates for VEVENT (UTC format: YYYYMMDDTHHMMSSZ)\nfunction formatVEventDate(date) {\n  return date.toISOString().replace(/[-:]/g, '').replace(/\\.\\d{3}/, '');\n}\n\n// Generate unique event ID\nconst eventId = `appointment-${sessionId}-${Date.now()}@chatbot.ai`;\n\n// Build event title and description\nconst eventTitle = language === 'pt' \n  ? `Consulta ${appointmentType} - ${attendeeName}`\n  : `${appointmentType} Consultation - ${attendeeName}`;\n\nconst eventDescription = language === 'pt'\n  ? `Agendamento via chatbot\\nTipo: ${appointmentType}\\nCliente: ${attendeeName}\\nEmail: ${attendeeEmail}\\nSessão: ${sessionId}`\n  : `Appointment via chatbot\\nType: ${appointmentType}\\nClient: ${attendeeName}\\nEmail: ${attendeeEmail}\\nSession: ${sessionId}`;\n\n// Build VEVENT (RFC 5545 compliant)\nconst vevent = `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//AI Chatbot//Appointment Scheduler//EN\nCALSCALE:GREGORIAN\nMETHOD:PUBLISH\nBEGIN:VTIMEZONE\nTZID:Europe/Lisbon\nBEGIN:DAYLIGHT\nTZOFFSETFROM:+0000\nTZOFFSETTO:+0100\nTZNAME:WEST\nDTSTART:19700329T010000\nRRULE:FREQ=YEARLY;BYMONTH=3;BYDAY=-1SU\nEND:DAYLIGHT\nBEGIN:STANDARD\nTZOFFSETFROM:+0100\nTZOFFSETTO:+0000\nTZNAME:WET\nDTSTART:19701025T020000\nRRULE:FREQ=YEARLY;BYMONTH=10;BYDAY=-1SU\nEND:STANDARD\nEND:VTIMEZONE\nBEGIN:VEVENT\nUID:${eventId}\nDTSTAMP:${formatVEventDate(new Date())}\nDTSTART;TZID=Europe/Lisbon:${formatVEventDate(startDateTime).slice(0, -1)}\nDTEND;TZID=Europe/Lisbon:${formatVEventDate(endDateTime).slice(0, -1)}\nSUMMARY:${eventTitle}\nDESCRIPTION:${eventDescription.replace(/\\n/g, '\\\\n')}\nLOCATION:Online/Office\nSTATUS:TENTATIVE\nCLASS:PRIVATE\nTRANSP:OPAQUE\n${attendeeEmail ? `ATTENDEE;CN=${attendeeName};RSVP=TRUE:mailto:${attendeeEmail}\\n` : ''}ORGANIZER;CN=AI Assistant:mailto:${process.env.ADMIN_EMAIL || 'admin@company.com'}\nCATEGORIES:AI-Generated,${appointmentType}\nEND:VEVENT\nEND:VCALENDAR`;\n\nreturn [{\n  json: {\n    ...appointmentData,\n    vevent,\n    eventTitle,\n    eventDescription,\n    startDateTime: startDateTime.toISOString(),\n    endDateTime: endDateTime.toISOString(),\n    eventId,\n    calendarData: {\n      title: eventTitle,\n      start: startDateTime.toISOString(),\n      end: endDateTime.toISOString(),\n      description: eventDescription,\n      attendees: emails,\n      timezone: 'Europe/Lisbon',\n      type: appointmentType\n    }\n  }\n}];"
+      },
+      "id": "0ad6ea61-0bd1-4459-9763-4052c5251923",
+      "name": "Nextcloud Calendar Creator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2380,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.NEXTCLOUD_URL }}/remote.php/dav/calendars/{{ $env.NEXTCLOUD_USERNAME }}/business-appointments/",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "907f59f8-6e2e-4ed0-ae5a-7e4a3bcb8efd",
+      "name": "Nextcloud Calendar API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2560,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "a28010fd-47ad-49a3-8339-947e3a68b000",
+      "name": "Save User Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        1620,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "8ec1c8d7-0f50-4d00-b649-dff84542d9f1",
+      "name": "Save AI Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2000,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"error\": \"Message is empty\",\n  \"language\": \"en\",\n  \"timestamp\": \"{{ new Date().toISOString() }}\",\n  \"sessionId\": \"{{ $json.sessionId || 'unknown' }}\"\n}",
+        "options": {}
+      },
+      "id": "b9bd2a81-b5e6-4c67-817b-a1826f06500c",
+      "name": "Empty Message Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        180,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"fromCache\": true\n}",
+        "options": {}
+      },
+      "id": "5729da22-514f-4592-8211-37810548c666",
+      "name": "Cached Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        180,
+        40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"error\": true,\n  \"errorHandled\": true\n}",
+        "options": {}
+      },
+      "id": "8ec70e1f-c97b-48e8-8649-9ad462a9e0af",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1580,
+        440
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM }}",
+        "toEmail": "={{ $env.ADMIN_EMAIL }}",
+        "subject": "🚨 Critical AI Chatbot Error - ID: {{ $json.errorContext.errorId }}",
+        "text": "Critical error occurred in AI Chatbot System:\\n\\nError ID: {{ $json.errorContext.errorId }}\\nTimestamp: {{ $json.errorContext.timestamp }}\\nSession ID: {{ $json.errorContext.sessionId }}\\nLanguage: {{ $json.errorContext.language }}\\nError Type: {{ $json.errorContext.errorType }}\\nMessage Length: {{ $json.errorContext.messageLength }}\\n\\nPlease investigate immediately.\\n\\nThis is an automated alert from the AI Chatbot monitoring system.",
+        "options": {}
+      },
+      "id": "74c22592-41c2-4d56-be93-f31488d2bc73",
+      "name": "Critical Error Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        1600,
+        660
+      ],
+      "webhookId": "cbea30a4-eb1a-4145-be36-bfac66c270c7"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced GDPR-compliant daily maintenance with detailed logging\nconst crypto = require('crypto');\n\n// Calculate cleanup dates\nconst now = new Date();\nconst thirtyDaysAgo = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000).toISOString();\nconst ninetyDaysAgo = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000).toISOString();\n\n// Clear in-memory cache safely\nif (typeof global !== 'undefined' && global.chatbotCache) {\n  global.chatbotCache.clear();\n  global.cacheTimestamps.clear();\n}\n\n// Define maintenance tasks with enhanced metadata\nconst maintenanceTasks = {\n  conversationCleanup: {\n    table: 'conversations',\n    cutoffDate: thirtyDaysAgo,\n    description: 'Delete conversations older than 30 days (GDPR compliance)',\n    priority: 'high'\n  },\n  appointmentCleanup: {\n    table: 'appointments', \n    cutoffDate: ninetyDaysAgo,\n    description: 'Delete completed appointments older than 90 days',\n    priority: 'medium'\n  },\n  cacheCleanup: {\n    description: 'Clear in-memory cache and reset counters',\n    completed: true,\n    priority: 'low'\n  }\n};\n\nreturn [{\n  json: {\n    maintenanceTasks,\n    timestamp: now.toISOString(),\n    timezone: 'Europe/Lisbon',\n    maintenanceId: crypto.randomUUID(),\n    status: 'ready'\n  }\n}];"
+      },
+      "id": "a5b4bdaa-a7b3-4cc0-b29c-9f1aadc7f902",
+      "name": "Enhanced Maintenance Preparation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -220,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/conversations?created_at=lt.{{ $json.maintenanceTasks.conversationCleanup.cutoffDate }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "512d3232-45a8-4151-a9f5-4f34459b1161",
+      "name": "Cleanup Old Conversations",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -20,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointments?created_at=lt.{{ $json.maintenanceTasks.appointmentCleanup.cutoffDate }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "42b4b179-6bb3-44aa-ae49-5ea026fb4212",
+      "name": "Cleanup Old Appointments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        180,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Enhanced maintenance reporting with comprehensive analytics\nconst maintenanceData = $input.item(0).json;\nconst conversationCleanup = $input.item(1).json;\nconst appointmentCleanup = $input.item(2).json;\n\n// Calculate success/failure status\nfunction getTaskStatus(result) {\n  if (result.error) return 'failed';\n  if (result.status && result.status >= 200 && result.status < 300) return 'completed';\n  return 'completed'; // Default to completed if no error\n}\n\nconst report = {\n  maintenanceId: maintenanceData.maintenanceId,\n  timestamp: new Date().toISOString(),\n  timezone: 'Europe/Lisbon',\n  duration: {\n    start: maintenanceData.timestamp,\n    end: new Date().toISOString()\n  },\n  tasks: {\n    conversationCleanup: {\n      status: getTaskStatus(conversationCleanup),\n      recordsAffected: conversationCleanup.count || 0,\n      error: conversationCleanup.error || null,\n      cutoffDate: maintenanceData.maintenanceTasks.conversationCleanup.cutoffDate\n    },\n    appointmentCleanup: {\n      status: getTaskStatus(appointmentCleanup),\n      recordsAffected: appointmentCleanup.count || 0,\n      error: appointmentCleanup.error || null,\n      cutoffDate: maintenanceData.maintenanceTasks.appointmentCleanup.cutoffDate\n    },\n    cacheCleanup: {\n      status: 'completed',\n      description: 'In-memory cache cleared successfully'\n    }\n  },\n  summary: {\n    totalTasksScheduled: 3,\n    totalTasksCompleted: [\n      getTaskStatus(conversationCleanup) === 'completed' ? 1 : 0,\n      getTaskStatus(appointmentCleanup) === 'completed' ? 1 : 0,\n      1 // cache always succeeds\n    ].reduce((a, b) => a + b, 0),\n    totalTasksFailed: [\n      getTaskStatus(conversationCleanup) === 'failed' ? 1 : 0,\n      getTaskStatus(appointmentCleanup) === 'failed' ? 1 : 0\n    ].reduce((a, b) => a + b, 0),\n    totalRecordsDeleted: (conversationCleanup.count || 0) + (appointmentCleanup.count || 0)\n  }\n};\n\n// Add overall status\nreport.overallStatus = report.summary.totalTasksFailed === 0 ? 'success' : 'partial_failure';\n\nreturn [{\n  json: report\n}];"
+      },
+      "id": "42453b50-674b-4d0a-946b-5ffa0b098670",
+      "name": "Enhanced Maintenance Report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        380,
+        -300
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SMTP_FROM }}",
+        "toEmail": "={{ $env.ADMIN_EMAIL }}",
+        "subject": "{{ $json.overallStatus === 'success' ? '✅' : '⚠️' }} Daily Maintenance Report - AI Chatbot ({{ $json.maintenanceId }})",
+        "text": "Daily maintenance completed for AI Chatbot System:\\n\\n=== MAINTENANCE SUMMARY ===\\nMaintenance ID: {{ $json.maintenanceId }}\\nOverall Status: {{ $json.overallStatus }}\\nTimestamp: {{ $json.timestamp }}\\nTimezone: {{ $json.timezone }}\\nStart Time: {{ $json.duration.start }}\\nEnd Time: {{ $json.duration.end }}\\n\\n=== PERFORMANCE METRICS ===\\nTasks Scheduled: {{ $json.summary.totalTasksScheduled }}\\nTasks Completed: {{ $json.summary.totalTasksCompleted }}/{{ $json.summary.totalTasksScheduled }}\\nTasks Failed: {{ $json.summary.totalTasksFailed }}\\nTotal Records Deleted: {{ $json.summary.totalRecordsDeleted }}\\n\\n=== CONVERSATION CLEANUP ===\\nStatus: {{ $json.tasks.conversationCleanup.status }}\\nRecords Deleted: {{ $json.tasks.conversationCleanup.recordsAffected }}\\nCutoff Date: {{ $json.tasks.conversationCleanup.cutoffDate }}\\nError: {{ $json.tasks.conversationCleanup.error || 'None' }}\\n\\n=== APPOINTMENT CLEANUP ===\\nStatus: {{ $json.tasks.appointmentCleanup.status }}\\nRecords Deleted: {{ $json.tasks.appointmentCleanup.recordsAffected }}\\nCutoff Date: {{ $json.tasks.appointmentCleanup.cutoffDate }}\\nError: {{ $json.tasks.appointmentCleanup.error || 'None' }}\\n\\n=== CACHE CLEANUP ===\\nStatus: {{ $json.tasks.cacheCleanup.status }}\\nDescription: {{ $json.tasks.cacheCleanup.description }}\\n\\n---\\nThis is an automated report from the AI Chatbot maintenance system.\\nReport generated at: {{ $json.timestamp }}",
+        "options": {}
+      },
+      "id": "470820bc-bc0c-4a6f-85f0-ae6ffa6afad4",
+      "name": "Enhanced Maintenance Email Report",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        580,
+        -300
+      ],
+      "webhookId": "4a3a15ff-ba4b-489d-9924-b89825e87636"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Security Validator - Input Sanitization & Validation\nconst crypto = require('crypto');\n\n// Get input data\nconst inputData = $input.all();\nconst body = inputData[0].body || {};\n\n// Security validation patterns\nconst sqlInjectionPattern = /('|(\\-\\-)|(;)|(\\||\\||)|(\\*|\\*)|(%7C))/i;\nconst xssPattern = /<[^>]*>?/gm;\nconst dosPattern = /(.{1000,})/; // Basic DoS protection\n\n// Validate required fields\nif (!body.message || typeof body.message !== 'string') {\n  throw new Error('Invalid or missing message field');\n}\n\n// Security checks\nif (sqlInjectionPattern.test(body.message) || \n    xssPattern.test(body.message) || \n    dosPattern.test(body.message)) {\n  throw new Error('Security validation failed');\n}\n\n// Sanitize input\nconst sanitizedMessage = body.message\n  .trim()\n  .substring(0, 1000) // Limit message length\n  .replace(/[<>&\"']/g, (match) => {\n    const escapeMap = {\n      '<': '&lt;',\n      '>': '&gt;',\n      '&': '&amp;',\n      '\"': '&quot;',\n      \"'\": '&#x27;'\n    };\n    return escapeMap[match];\n  });\n\n// Generate session hash for caching (GDPR-compliant)\nconst sessionId = body.sessionId || 'anonymous';\nconst messageHash = crypto.createHash('sha256')\n  .update(sanitizedMessage + sessionId)\n  .digest('hex');\n\n// Language detection\nconst language = body.language || 'pt'; // Default to Portuguese\nif (!['pt', 'en'].includes(language)) {\n  throw new Error('Unsupported language');\n}\n\n// Prepare validated data\nconst validatedData = {\n  message: sanitizedMessage,\n  language: language,\n  sessionId: sessionId,\n  messageHash: messageHash,\n  timestamp: new Date().toISOString(),\n  userAgent: body.userAgent || 'unknown',\n  ip: $input.item().headers['x-forwarded-for'] || 'unknown'\n};\n\nreturn [{ json: validatedData }];"
+      },
+      "id": "e2a45235-9a53-49a9-871b-35b3f8a8f5e7",
+      "name": "Security Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -400,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointments",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "name": "Save Appointment to DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2760,
+        40
+      ],
+      "id": "1b1071a6-9466-4beb-8a15-2bd676794dd3"
+    },
+    {
+      "parameters": {},
+      "name": "Prepare Confirmation Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2940,
+        40
+      ],
+      "id": "8e133b02-bbc4-4af2-8a93-02e2f38b7f2c"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.emailData.from }}",
+        "toEmail": "={{ $json.emailData.to }}",
+        "subject": "={{ $json.emailData.subject }}",
+        "text": "={{ $json.emailData.text }}",
+        "options": {
+          "attachments": "={{ $json.emailData.attachments }}"
+        }
+      },
+      "name": "Send Confirmation Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        3120,
+        40
+      ],
+      "id": "a1cc1162-9faa-47d7-9607-09149d20ed01",
+      "webhookId": "78e059e8-e0ad-4bf8-8219-a05919fbab44"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"appointmentCreated\": true,\n  \"appointmentDetails\": {\n    \"eventId\": \"{{ $json.eventId }}\",\n    \"title\": \"{{ $json.eventTitle }}\",\n    \"startTime\": \"{{ $json.startDateTime }}\",\n    \"endTime\": \"{{ $json.endDateTime }}\",\n    \"type\": \"{{ $json.extractedAppointmentDetails.type }}\",\n    \"userEmail\": \"{{ $json.extractedAppointmentDetails.email }}\"\n  }\n}",
+        "options": {}
+      },
+      "name": "Appointment Response1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3320,
+        40
+      ],
+      "id": "0786a7e6-60f1-457a-8fa5-2068ef1a4acb"
+    },
+    {
+      "parameters": {},
+      "name": "Audit Logger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2200,
+        300
+      ],
+      "id": "d2b3d497-7ed6-42f3-a73e-97b4daf6d87b"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/audit_logs",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "name": "Save Audit Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2380,
+        300
+      ],
+      "id": "a8eeafce-31aa-4236-b69c-ea9f36df9ff3"
+    },
+    {
+      "parameters": {},
+      "name": "Redis Cache Set",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2580,
+        300
+      ],
+      "id": "1da3426c-0bc7-4982-88e4-e1187b8a6338"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.REDIS_URL }}/set",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "response": {}
+        }
+      },
+      "name": "Execute Redis Set",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        2780,
+        300
+      ],
+      "id": "44526c2c-376c-4e93-89fb-eaa68fb06e94"
+    },
+    {
+      "parameters": {},
+      "name": "API Response Formatter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2980,
+        300
+      ],
+      "id": "43c1cc72-3d0c-46d1-bc57-0c14fda40970"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ $json }}",
+        "options": {}
+      },
+      "name": "API Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        3180,
+        300
+      ],
+      "id": "d7201da8-6979-4a5e-aac4-3fc8aa94538a"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"appointmentCreated\": true,\n  \"appointmentDetails\": {\n    \"eventId\": \"{{ $json.eventId }}\",\n    \"title\": \"{{ $json.eventTitle }}\",\n    \"startTime\": \"{{ $json.startDateTime }}\",\n    \"endTime\": \"{{ $json.endDateTime }}\",\n    \"type\": \"{{ $json.extractedAppointmentDetails.type }}\",\n    \"userEmail\": \"{{ $json.extractedAppointmentDetails.email }}\"\n  }\n}",
+        "options": {}
+      },
+      "name": "Appointment Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2580,
+        500
+      ],
+      "id": "179b5a7f-05b5-4f29-a79d-a035e200140c"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"fromCache\": true\n}",
+        "options": {}
+      },
+      "name": "Cached Response1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        1980,
+        500
+      ],
+      "id": "6f3d2c2a-04c4-4b1b-a89e-9dab1176f453"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"error\": \"Message is empty\",\n  \"language\": \"en\",\n  \"timestamp\": \"{{ new Date().toISOString() }}\",\n  \"sessionId\": \"{{ $json.sessionId || 'unknown' }}\"\n}",
+        "options": {}
+      },
+      "name": "Empty Message Response1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2180,
+        500
+      ],
+      "id": "e70cd3ea-ee0e-4d12-99ed-084b2512fe16"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"response\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"sessionId\": \"{{ $json.sessionId }}\",\n  \"timestamp\": \"{{ $json.timestamp }}\",\n  \"error\": true,\n  \"errorHandled\": true\n}",
+        "options": {}
+      },
+      "name": "Error Response1",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        2380,
+        500
+      ],
+      "id": "27930b2a-a9f8-4fbe-b2f7-a155fb8b6185"
+    },
+    {
+      "parameters": {},
+      "name": "Daily Reminder Trigger",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [
+        -500,
+        660
+      ],
+      "id": "67ad1110-7efc-4d75-ba1f-61dbed1f1750"
+    },
+    {
+      "parameters": {},
+      "name": "Prepare Reminder Dates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        660
+      ],
+      "id": "89885b08-d827-4ace-8516-68d4839f1736"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointments?start_datetime=gte.{{ $json.tomorrowStartISO }}&start_datetime=lte.{{ $json.tomorrowEndISO }}&status=eq.pending&reminder_sent_date=is.null",
+        "options": {
+          "response": {},
+          "timeout": 10000
+        }
+      },
+      "name": "Fetch Upcoming Appointments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -140,
+        660
+      ],
+      "id": "0f5de8ee-7824-4ced-8c7e-3b1e5b2121f1"
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "name": "Split Appointments for Processing",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 1,
+      "position": [
+        40,
+        660
+      ],
+      "id": "8c4398d8-932e-4ba1-a96d-d744ae3c72ce"
+    },
+    {
+      "parameters": {},
+      "name": "Prepare Reminder Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        220,
+        660
+      ],
+      "id": "6fe51c96-7ad4-4db2-9312-42f0a7348ff8"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $json.emailData.from }}",
+        "toEmail": "={{ $json.emailData.to }}",
+        "subject": "={{ $json.emailData.subject }}",
+        "text": "={{ $json.emailData.text }}",
+        "options": {
+          "attachments": "={{ $json.emailData.attachments }}"
+        }
+      },
+      "name": "Send Reminder Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2,
+      "position": [
+        400,
+        660
+      ],
+      "id": "a365343f-6009-4514-a6ff-b25891fe21e4",
+      "webhookId": "cb2374cc-f87b-4478-a6a8-3588553d3630"
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SUPABASE_URL }}/rest/v1/appointments?event_id=eq.{{ $json.event_id }}",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {}
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "name": "Mark Reminder Sent",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        620,
+        660
+      ],
+      "id": "8af87c51-d2e9-4fd6-b869-796363e80ead"
+    }
+  ],
+  "connections": {
+    "Daily Maintenance Trigger": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Preparation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Master Webhook": {
+      "main": [
+        [
+          {
+            "node": "Security Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Check Router": {
+      "main": [
+        [
+          {
+            "node": "Cached Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Cache Checker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cache Checker": {
+      "main": [
+        [
+          {
+            "node": "Knowledge Base Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Knowledge Base Fetch": {
+      "main": [
+        [
+          {
+            "node": "Conversation History Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Conversation History Fetch": {
+      "main": [
+        [
+          {
+            "node": "Llama3.2 AI Processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llama3.2 AI Processor": {
+      "main": [
+        [
+          {
+            "node": "Llama API Call",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Llama API Call": {
+      "main": [
+        [
+          {
+            "node": "AI Error Checker",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "AI Error Checker": {
+      "main": [
+        [
+          {
+            "node": "Process AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "GDPR Error Handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process AI Response": {
+      "main": [
+        [
+          {
+            "node": "Save User Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GDPR Error Handler": {
+      "main": [
+        [
+          {
+            "node": "Error Response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Critical Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Router": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Appointment Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Appointment Extractor": {
+      "main": [
+        [
+          {
+            "node": "Appointment Data Validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Appointment Data Validator": {
+      "main": [
+        [
+          {
+            "node": "Nextcloud Calendar Creator",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Save AI Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nextcloud Calendar Creator": {
+      "main": [
+        [
+          {
+            "node": "Nextcloud Calendar API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Nextcloud Calendar API": {
+      "main": [
+        [
+          {
+            "node": "Save Appointment to DB",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save User Message": {
+      "main": [
+        [
+          {
+            "node": "Intent Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save AI Response": {
+      "main": [
+        [
+          {
+            "node": "Audit Logger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Response": {
+      "main": [
+        [
+          {
+            "node": "Critical Error Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Maintenance Preparation": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Conversations",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Conversations": {
+      "main": [
+        [
+          {
+            "node": "Cleanup Old Appointments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Cleanup Old Appointments": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enhanced Maintenance Report": {
+      "main": [
+        [
+          {
+            "node": "Enhanced Maintenance Email Report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Security Validator": {
+      "main": [
+        [
+          {
+            "node": "Advanced Language Detection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Appointment to DB": {
+      "main": [
+        [
+          {
+            "node": "Prepare Confirmation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Confirmation Email": {
+      "main": [
+        [
+          {
+            "node": "Send Confirmation Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Confirmation Email": {
+      "main": [
+        [
+          {
+            "node": "Appointment Response1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Audit Logger": {
+      "main": [
+        [
+          {
+            "node": "Save Audit Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Audit Log": {
+      "main": [
+        [
+          {
+            "node": "Redis Cache Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Redis Cache Set": {
+      "main": [
+        [
+          {
+            "node": "Execute Redis Set",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execute Redis Set": {
+      "main": [
+        [
+          {
+            "node": "API Response Formatter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "API Response Formatter": {
+      "main": [
+        [
+          {
+            "node": "API Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Daily Reminder Trigger": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reminder Dates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reminder Dates": {
+      "main": [
+        [
+          {
+            "node": "Fetch Upcoming Appointments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Upcoming Appointments": {
+      "main": [
+        [
+          {
+            "node": "Split Appointments for Processing",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Appointments for Processing": {
+      "main": [
+        [
+          {
+            "node": "Prepare Reminder Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Reminder Email": {
+      "main": [
+        [
+          {
+            "node": "Send Reminder Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Reminder Email": {
+      "main": [
+        []
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "970daa81c0dccb064b89ee69093ff65fdf6b593ee51c25840818936c80d5446e"
+  }
+}
