@@ -1,0 +1,1099 @@
+{
+  "name": "Lia_Chatbot_Complete_Bilingual",
+  "nodes": [
+    {
+      "parameters": {
+        "public": true,
+        "options": {
+          "cors": {
+            "allowedOrigins": "*"
+          }
+        }
+      },
+      "id": "webhook_trigger",
+      "name": "Chat Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [-1800, 300],
+      "webhookId": "lia-chatbot-main"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Security Validation and Input Processing\nconst body = $input.first().json.body || $input.first().json || {};\nconst headers = $input.first().json.headers || {};\n\n// Extract data with fallbacks\nconst userMessage = body.message?.trim() || body.text?.trim() || '';\nconst sessionId = body.sessionId || body.session_id || 'sess_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);\nconst preferredLanguage = body.language || body.lang || null;\n\n// GDPR-compliant data extraction\nconst clientIP = headers['x-forwarded-for']?.split(',')[0] || headers['x-real-ip'] || 'unknown';\nconst userAgent = headers['user-agent'] || 'unknown';\n\n// Input validation\nif (!userMessage || userMessage.length === 0) {\n  return [{\n    json: {\n      error: true,\n      errorType: 'empty_message',\n      sessionId,\n      timestamp: new Date().toISOString()\n    }\n  }];\n}\n\n// Sanitize message - remove HTML/scripts but keep Portuguese characters\nfunction sanitizeInput(text) {\n  return text\n    .replace(/<script[^>]*>.*?<\\/script>/gi, '')\n    .replace(/<[^>]+>/g, '')\n    .replace(/[^\\w\\s\\u00C0-\\u017F\\u0100-\\u024F\\u1E00-\\u1EFF.,!?@#$%&*()\\-+=:;'\"/]/g, '')\n    .trim()\n    .substring(0, 1000); // Limit length\n}\n\nconst sanitizedMessage = sanitizeInput(userMessage);\n\n// Basic XSS prevention check\nif (sanitizedMessage !== userMessage) {\n  console.log('Message was sanitized for security');\n}\n\nreturn [{\n  json: {\n    originalMessage: userMessage,\n    sanitizedMessage,\n    sessionId,\n    preferredLanguage,\n    clientIP,\n    userAgent,\n    timestamp: new Date().toISOString(),\n    messageLength: sanitizedMessage.length\n  }\n}];"
+      },
+      "id": "security_validator",
+      "name": "Security & Input Validator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1600, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8002/detect",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $json.sanitizedMessage }}\",\n  \"preferredLanguage\": \"{{ $json.preferredLanguage }}\"\n}",
+        "options": {
+          "timeout": 3000
+        }
+      },
+      "id": "language_detector",
+      "name": "Language Detection (franc)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1400, 300],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Session Management with Redis Cache\nconst sessionId = $json.sessionId;\nconst detectedLanguage = $json.detectedLanguage || 'pt';\nconst sanitizedMessage = $json.sanitizedMessage;\n\n// Generate cache key for this conversation\nconst cacheKey = `chat:${sessionId}:${Buffer.from(sanitizedMessage.toLowerCase()).toString('base64').substring(0, 20)}`;\n\nreturn [{\n  json: {\n    ...$input.first().json,\n    detectedLanguage: detectedLanguage === 'por' ? 'pt' : detectedLanguage === 'eng' ? 'en' : detectedLanguage,\n    cacheKey,\n    sessionData: {\n      sessionId,\n      language: detectedLanguage,\n      startTime: new Date().toISOString()\n    }\n  }\n}];"
+      },
+      "id": "session_processor",
+      "name": "Session Processor",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "key": "={{ $json.cacheKey }}",
+        "options": {}
+      },
+      "id": "redis_cache_check",
+      "name": "Check Redis Cache",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [-1000, 300],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "credentials": {
+        "redis": {
+          "id": "redis_cache",
+          "name": "Redis Cache"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.value }}",
+              "operation": "isNotEmpty"
+            }
+          ]
+        }
+      },
+      "id": "cache_found",
+      "name": "Cache Found?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [-800, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8002/intent",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $json.sanitizedMessage }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\"\n}",
+        "options": {
+          "timeout": 3000
+        }
+      },
+      "id": "intent_classifier",
+      "name": "Intent Classification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-600, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8002/ner",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"text\": \"{{ $json.sanitizedMessage }}\",\n  \"language\": \"{{ $json.detectedLanguage }}\"\n}",
+        "options": {
+          "timeout": 3000
+        }
+      },
+      "id": "ner_processor",
+      "name": "NER Processing",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-400, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:7700/indexes/aiquimia_kb/search",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "Bearer AlbiNI6CPgXPe0VFsDmrPyu1JZnIlVOW"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"q\": \"{{ $json.sanitizedMessage }}\",\n  \"filter\": \"language = '{{ $json.detectedLanguage }}' OR language = 'both'\",\n  \"limit\": 5\n}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "meilisearch_kb",
+      "name": "Search Knowledge Base",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-200, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "url": "=http://10.52.0.1:8000/rest/v1/conversations?session_id=eq.{{ $json.sessionId }}&order=created_at.desc&limit=5",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "fetch_conversation",
+      "name": "Fetch Conversation History",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [0, 400],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare context for Llama3.2\nconst mainData = $input.all()[0].json;\nconst intent = $input.all()[1]?.json?.intent || 'general';\nconst entities = $input.all()[2]?.json?.entities || {};\nconst knowledgeBase = $input.all()[3]?.json?.hits || [];\nconst conversationHistory = $input.all()[4]?.json || [];\n\n// Build knowledge context\nfunction buildKnowledgeContext(kb, lang) {\n  if (!Array.isArray(kb) || kb.length === 0) return 'No specific information available.';\n  \n  return kb.slice(0, 3).map(item => \n    `${item.title || 'Info'}: ${item.content || item.description || ''}`\n  ).join('\\n\\n');\n}\n\n// Build conversation context\nfunction buildConversationContext(history) {\n  if (!Array.isArray(history) || history.length === 0) return 'No previous conversation.';\n  \n  return history.slice(0, 3).reverse().map(msg => \n    `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.message}`\n  ).join('\\n');\n}\n\n// System prompts in both languages\nconst systemPrompts = {\n  pt: `Você é a Lia, assistente de IA bilíngue profissional da AIQUIMIA.\n\nSobre a AIQUIMIA:\n${buildKnowledgeContext(knowledgeBase, 'pt')}\n\nDiretrizes:\n- Responda em português (PT-PT) de forma concisa e clara\n- Use no máximo 150 palavras\n- Seja profissional mas calorosa e empática\n- Se não souber algo, admita e ofereça ajuda alternativa\n- Para agendamentos, solicite nome, email e horário preferido\n\nIntenção detectada: ${intent}\nEntidades: ${JSON.stringify(entities)}\n\nHistórico:\n${buildConversationContext(conversationHistory)}`,\n\n  en: `You are Lia, AIQUIMIA's professional bilingual AI assistant.\n\nAbout AIQUIMIA:\n${buildKnowledgeContext(knowledgeBase, 'en')}\n\nGuidelines:\n- Respond in English concisely and clearly\n- Use maximum 150 words\n- Be professional yet warm and empathetic\n- If unsure, admit it and offer alternative help\n- For appointments, request name, email, and preferred time\n\nDetected intent: ${intent}\nEntities: ${JSON.stringify(entities)}\n\nHistory:\n${buildConversationContext(conversationHistory)}`\n};\n\nconst lang = mainData.detectedLanguage || 'pt';\nconst systemPrompt = systemPrompts[lang];\n\nreturn [{\n  json: {\n    model: 'llama3.2:latest',\n    messages: [\n      {\n        role: 'system',\n        content: systemPrompt\n      },\n      {\n        role: 'user',\n        content: mainData.sanitizedMessage\n      }\n    ],\n    stream: false,\n    temperature: 0.7,\n    max_tokens: 500,\n    top_p: 0.9,\n    // Context data for next nodes\n    sessionId: mainData.sessionId,\n    detectedLanguage: lang,\n    intent,\n    entities,\n    cacheKey: mainData.cacheKey,\n    originalMessage: mainData.sanitizedMessage\n  }\n}];"
+      },
+      "id": "prepare_llama_request",
+      "name": "Prepare Llama Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [200, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api-dev.aiquimia.ai/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "llama_api",
+      "name": "Llama3.2 API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [400, 400],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "llama_auth",
+          "name": "Llama API Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Process Llama response\nconst response = $json;\nconst previousData = $('prepare_llama_request').first().json;\n\n// Extract response text\nlet aiResponse = '';\nif (response.choices && response.choices[0]) {\n  aiResponse = response.choices[0].message.content;\n} else if (response.response) {\n  aiResponse = response.response;\n} else if (response.text) {\n  aiResponse = response.text;\n}\n\n// Clean response\naiResponse = aiResponse\n  .replace(/^(Assistant:|Lia:|AI:)\\s*/i, '')\n  .trim();\n\n// Check for appointment intent\nconst appointmentKeywords = {\n  pt: /\\b(agendar|marcar|reunião|meeting|consulta|horário|disponível)\\b/i,\n  en: /\\b(schedule|book|appointment|meeting|consultation|available)\\b/i\n};\n\nconst hasAppointmentIntent = \n  appointmentKeywords[previousData.detectedLanguage]?.test(previousData.originalMessage) ||\n  appointmentKeywords[previousData.detectedLanguage]?.test(aiResponse) ||\n  previousData.intent === 'appointment';\n\nreturn [{\n  json: {\n    response: aiResponse,\n    sessionId: previousData.sessionId,\n    language: previousData.detectedLanguage,\n    hasAppointmentIntent,\n    intent: previousData.intent,\n    entities: previousData.entities,\n    cacheKey: previousData.cacheKey,\n    originalMessage: previousData.originalMessage,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "process_response",
+      "name": "Process AI Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 400]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ $json.cacheKey }}",
+        "value": "={{ JSON.stringify({ response: $json.response, language: $json.language, timestamp: $json.timestamp }) }}",
+        "expire": true,
+        "ttl": 600
+      },
+      "id": "cache_response",
+      "name": "Cache Response",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [800, 400],
+      "credentials": {
+        "redis": {
+          "id": "redis_cache",
+          "name": "Redis Cache"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8000/rest/v1/conversations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session_id\": \"{{ $json.sessionId }}\",\n  \"role\": \"user\",\n  \"message\": \"{{ $json.originalMessage }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"intent\": \"{{ $json.intent }}\",\n  \"metadata\": {{ JSON.stringify($json.entities) }}\n}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "save_user_message",
+      "name": "Save User Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 500]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8000/rest/v1/conversations",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"session_id\": \"{{ $json.sessionId }}\",\n  \"role\": \"assistant\",\n  \"message\": \"{{ $json.response }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"intent\": \"{{ $json.intent }}\"\n}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "save_ai_response",
+      "name": "Save AI Response",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [800, 600]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasAppointmentIntent }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "check_appointment",
+      "name": "Check Appointment Intent",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1000, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract appointment details\nconst { originalMessage, response, language, sessionId, entities } = $json;\nconst fullText = `${originalMessage} ${response}`.toLowerCase();\n\n// Enhanced extraction patterns\nconst patterns = {\n  email: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g,\n  phone: /(?:\\+351|00351|351)?\\s*[0-9]{2,3}\\s*[0-9]{3}\\s*[0-9]{3,4}/g,\n  names: {\n    pt: /(?:meu nome é|sou o|sou a|chamo-me)\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)/gi,\n    en: /(?:my name is|i am|i'm)\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)*)/gi\n  },\n  dates: {\n    pt: /(?:dia|em)\\s*(\\d{1,2})[\\/-](\\d{1,2})(?:[\\/-](\\d{2,4}))?/gi,\n    en: /(?:on|date)\\s*(\\d{1,2})[\\/-](\\d{1,2})(?:[\\/-](\\d{2,4}))?/gi\n  },\n  times: {\n    pt: /(?:às|hora)\\s*(\\d{1,2})(?:[:h](\\d{2}))?\\s*(?:horas)?/gi,\n    en: /(?:at)\\s*(\\d{1,2})(?:[:.](\\d{2}))?\\s*(?:am|pm)?/gi\n  }\n};\n\n// Extract data\nconst emails = (fullText.match(patterns.email) || []).filter((v, i, a) => a.indexOf(v) === i);\nconst phones = (fullText.match(patterns.phone) || []).filter((v, i, a) => a.indexOf(v) === i);\n\nconst names = [];\nlet nameMatch;\nwhile ((nameMatch = patterns.names[language]?.exec(fullText)) !== null) {\n  names.push(nameMatch[1]);\n}\n\nconst dates = [];\nlet dateMatch;\nwhile ((dateMatch = patterns.dates[language]?.exec(fullText)) !== null) {\n  dates.push(dateMatch[0]);\n}\n\nconst times = [];\nlet timeMatch;\nwhile ((timeMatch = patterns.times[language]?.exec(fullText)) !== null) {\n  times.push(timeMatch[0]);\n}\n\n// Determine appointment type\nlet appointmentType = 'consultation';\nif (fullText.includes('ai') || fullText.includes('ia')) appointmentType = 'ai-consultation';\nelse if (fullText.includes('lab')) appointmentType = 'lab-session';\nelse if (fullText.includes('training') || fullText.includes('treinamento')) appointmentType = 'training';\n\n// Generate suggested datetime if none provided\nconst suggestedDate = new Date();\nsuggestedDate.setDate(suggestedDate.getDate() + 3); // 3 days from now\nsuggestedDate.setHours(14, 0, 0, 0); // 2 PM\n\n// Skip weekends\nwhile (suggestedDate.getDay() === 0 || suggestedDate.getDay() === 6) {\n  suggestedDate.setDate(suggestedDate.getDate() + 1);\n}\n\nreturn [{\n  json: {\n    sessionId,\n    language,\n    emails,\n    phones,\n    names,\n    dates,\n    times,\n    appointmentType,\n    suggestedDateTime: suggestedDate.toISOString(),\n    hasValidData: emails.length > 0 || names.length > 0\n  }\n}];"
+      },
+      "id": "extract_appointment",
+      "name": "Extract Appointment Details",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1200, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json.hasValidData }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "validate_appointment",
+      "name": "Validate Appointment Data",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1400, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create calendar event\nconst appointment = $json;\nconst attendeeName = appointment.names[0] || 'Guest';\nconst attendeeEmail = appointment.emails[0] || '';\n\n// Parse dates and times if provided\nlet eventDateTime = new Date(appointment.suggestedDateTime);\n\nif (appointment.dates.length > 0 && appointment.times.length > 0) {\n  // Parse the provided date and time\n  // This is simplified - in production you'd want more robust parsing\n  const dateStr = appointment.dates[0];\n  const timeStr = appointment.times[0];\n  // ... parsing logic ...\n}\n\nconst startDateTime = new Date(eventDateTime);\nconst endDateTime = new Date(eventDateTime.getTime() + 60 * 60 * 1000); // 1 hour\n\n// Format for ICS\nfunction formatICSDate(date) {\n  return date.toISOString().replace(/[-:]/g, '').replace(/\\.\\d{3}/, '');\n}\n\nconst eventId = `lia-${appointment.sessionId}-${Date.now()}`;\nconst eventTitle = appointment.language === 'pt' \n  ? `Consulta ${appointment.appointmentType} - ${attendeeName}`\n  : `${appointment.appointmentType} Consultation - ${attendeeName}`;\n\nconst eventDescription = appointment.language === 'pt'\n  ? `Agendamento via Lia (chatbot AIQUIMIA)\\nTipo: ${appointment.appointmentType}\\nCliente: ${attendeeName}\\nEmail: ${attendeeEmail}`\n  : `Appointment via Lia (AIQUIMIA chatbot)\\nType: ${appointment.appointmentType}\\nClient: ${attendeeName}\\nEmail: ${attendeeEmail}`;\n\n// Create ICS content\nconst icsContent = `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//AIQUIMIA//Lia Chatbot//EN\nCALSCALE:GREGORIAN\nMETHOD:REQUEST\nBEG
+		{
+      "parameters": {
+        "jsCode": "// Create calendar event\nconst appointment = $json;\nconst attendeeName = appointment.names[0] || 'Guest';\nconst attendeeEmail = appointment.emails[0] || '';\n\n// Parse dates and times if provided\nlet eventDateTime = new Date(appointment.suggestedDateTime);\n\nif (appointment.dates.length > 0 && appointment.times.length > 0) {\n  // Parse the provided date and time\n  // This is simplified - in production you'd want more robust parsing\n  const dateStr = appointment.dates[0];\n  const timeStr = appointment.times[0];\n  // ... parsing logic ...\n}\n\nconst startDateTime = new Date(eventDateTime);\nconst endDateTime = new Date(eventDateTime.getTime() + 60 * 60 * 1000); // 1 hour\n\n// Format for ICS\nfunction formatICSDate(date) {\n  return date.toISOString().replace(/[-:]/g, '').replace(/\\.\\d{3}/, '');\n}\n\nconst eventId = `lia-${appointment.sessionId}-${Date.now()}`;\nconst eventTitle = appointment.language === 'pt' \n  ? `Consulta ${appointment.appointmentType} - ${attendeeName}`\n  : `${appointment.appointmentType} Consultation - ${attendeeName}`;\n\nconst eventDescription = appointment.language === 'pt'\n  ? `Agendamento via Lia (chatbot AIQUIMIA)\\nTipo: ${appointment.appointmentType}\\nCliente: ${attendeeName}\\nEmail: ${attendeeEmail}`\n  : `Appointment via Lia (AIQUIMIA chatbot)\\nType: ${appointment.appointmentType}\\nClient: ${attendeeName}\\nEmail: ${attendeeEmail}`;\n\n// Create ICS content\nconst icsContent = `BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//AIQUIMIA//Lia Chatbot//EN\nCALSCALE:GREGORIAN\nMETHOD:REQUEST\nBEGIN:VEVENT\nUID:${eventId}@aiquimia.ai\nDTSTAMP:${formatICSDate(new Date())}\nDTSTART:${formatICSDate(startDateTime)}\nDTEND:${formatICSDate(endDateTime)}\nSUMMARY:${eventTitle}\nDESCRIPTION:${eventDescription.replace(/\\n/g, '\\\\n')}\nLOCATION:AIQUIMIA Office / Online\nSTATUS:TENTATIVE\n${attendeeEmail ? `ATTENDEE;CN=${attendeeName};RSVP=TRUE:mailto:${attendeeEmail}\\n` : ''}ORGANIZER;CN=AIQUIMIA:mailto:appointments@aiquimia.ai\nEND:VEVENT\nEND:VCALENDAR`;\n\nreturn [{\n  json: {\n    ...appointment,\n    eventId,\n    eventTitle,\n    eventDescription,\n    startDateTime: startDateTime.toISOString(),\n    endDateTime: endDateTime.toISOString(),\n    icsContent,\n    attendeeName,\n    attendeeEmail\n  }\n}];"
+      },
+      "id": "create_calendar_event",
+      "name": "Create Calendar Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1600, 200]
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "=https://10.52.0.1/remote.php/dav/calendars/demonstracao/appointments/{{ $json.eventId }}.ics",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "text/calendar; charset=utf-8"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "raw",
+        "rawContentType": "text/calendar",
+        "body": "={{ $json.icsContent }}",
+        "options": {
+          "timeout": 10000,
+          "redirect": {
+            "redirect": {
+              "followRedirects": true
+            }
+          }
+        }
+      },
+      "id": "save_to_nextcloud",
+      "name": "Save to Nextcloud",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1800, 200],
+      "continueOnFail": true,
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "nextcloud_auth",
+          "name": "Nextcloud Auth"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://10.52.0.1:8000/rest/v1/appointments",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"event_id\": \"{{ $json.eventId }}\",\n  \"session_id\": \"{{ $json.sessionId }}\",\n  \"attendee_name\": \"{{ $json.attendeeName }}\",\n  \"attendee_email\": \"{{ $json.attendeeEmail }}\",\n  \"appointment_type\": \"{{ $json.appointmentType }}\",\n  \"start_time\": \"{{ $json.startDateTime }}\",\n  \"end_time\": \"{{ $json.endDateTime }}\",\n  \"language\": \"{{ $json.language }}\",\n  \"status\": \"pending\"\n}",
+        "options": {
+          "timeout": 5000
+        }
+      },
+      "id": "save_appointment_db",
+      "name": "Save Appointment to DB",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare confirmation email\nconst appointment = $json;\nconst lang = appointment.language || 'pt';\n\nconst emailTemplates = {\n  pt: {\n    subject: `Confirmação de Agendamento - AIQUIMIA`,\n    html: `\n<!DOCTYPE html>\n<html>\n<head>\n  <meta charset=\"UTF-8\">\n  <style>\n    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background-color: #2c3e50; color: white; padding: 20px; text-align: center; }\n    .content { padding: 20px; background-color: #f4f4f4; }\n    .appointment-details { background-color: white; padding: 15px; margin: 20px 0; border-radius: 5px; }\n    .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h1>AIQUIMIA - Confirmação de Agendamento</h1>\n    </div>\n    <div class=\"content\">\n      <p>Olá ${appointment.attendeeName || 'Cliente'},</p>\n      <p>O seu agendamento foi confirmado com sucesso!</p>\n      <div class=\"appointment-details\">\n        <h3>Detalhes do Agendamento:</h3>\n        <p><strong>Data:</strong> ${new Date(appointment.startDateTime).toLocaleDateString('pt-PT')}</p>\n        <p><strong>Hora:</strong> ${new Date(appointment.startDateTime).toLocaleTimeString('pt-PT', {hour: '2-digit', minute:'2-digit'})}</p>\n        <p><strong>Tipo:</strong> ${appointment.appointmentType}</p>\n        <p><strong>Local:</strong> AIQUIMIA Office / Online</p>\n      </div>\n      <p>Receberá um lembrete 24 horas antes do agendamento.</p>\n      <p>Se precisar de reagendar ou cancelar, por favor entre em contacto connosco.</p>\n      <p>Atenciosamente,<br>Equipa AIQUIMIA</p>\n    </div>\n    <div class=\"footer\">\n      <p>AIQUIMIA - A Alquimia da Inteligência Artificial</p>\n      <p>Este é um email automático. Por favor não responda.</p>\n    </div>\n  </div>\n</body>\n</html>\n    `\n  },\n  en: {\n    subject: `Appointment Confirmation - AIQUIMIA`,\n    html: `\n<!DOCTYPE html>\n<html>\n<head>\n  <meta charset=\"UTF-8\">\n  <style>\n    body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }\n    .container { max-width: 600px; margin: 0 auto; padding: 20px; }\n    .header { background-color: #2c3e50; color: white; padding: 20px; text-align: center; }\n    .content { padding: 20px; background-color: #f4f4f4; }\n    .appointment-details { background-color: white; padding: 15px; margin: 20px 0; border-radius: 5px; }\n    .footer { text-align: center; padding: 20px; font-size: 12px; color: #666; }\n  </style>\n</head>\n<body>\n  <div class=\"container\">\n    <div class=\"header\">\n      <h1>AIQUIMIA - Appointment Confirmation</h1>\n    </div>\n    <div class=\"content\">\n      <p>Hello ${appointment.attendeeName || 'Guest'},</p>\n      <p>Your appointment has been successfully confirmed!</p>\n      <div class=\"appointment-details\">\n        <h3>Appointment Details:</h3>\n        <p><strong>Date:</strong> ${new Date(appointment.startDateTime).toLocaleDateString('en-US')}</p>\n        <p><strong>Time:</strong> ${new Date(appointment.startDateTime).toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit'})}</p>\n        <p><strong>Type:</strong> ${appointment.appointmentType}</p>\n        <p><strong>Location:</strong> AIQUIMIA Office / Online</p>\n      </div>\n      <p>You will receive a reminder 24 hours before your appointment.</p>\n      <p>If you need to reschedule or cancel, please contact us.</p>\n      <p>Best regards,<br>AIQUIMIA Team</p>\n    </div>\n    <div class=\"footer\">\n      <p>AIQUIMIA - The Alchemy of Artificial Intelligence</p>\n      <p>This is an automated email. Please do not reply.</p>\n    </div>\n  </div>\n</body>\n</html>\n    `\n  }\n};\n\nconst template = emailTemplates[lang];\n\nreturn [{\n  json: {\n    ...appointment,\n    emailSubject: template.subject,\n    emailHtml: template.html,\n    emailTo: appointment.attendeeEmail\n  }\n}];"
+      },
+      "id": "prepare_email",
+      "name": "Prepare Confirmation Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2200, 200]
+    },
+    {
+      "parameters": {
+        "fromEmail": "appointments@aiquimia.ai",
+        "toEmail": "={{ $json.emailTo }}",
+        "subject": "={{ $json.emailSubject }}",
+        "emailType": "html",
+        "htmlBody": "={{ $json.emailHtml }}",
+        "options": {
+          "attachments": {
+            "values": [
+              {
+                "propertyName": "appointment.ics",
+                "binaryPropertyName": "data"
+              }
+            ]
+          }
+        }
+      },
+      "id": "send_confirmation",
+      "name": "Send Confirmation Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2400, 200],
+      "credentials": {
+        "smtp": {
+          "id": "smtp_creds",
+          "name": "SMTP Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format cached response\nconst cachedData = JSON.parse($json.value);\n\nreturn [{\n  json: {\n    response: cachedData.response,\n    language: cachedData.language,\n    sessionId: $('session_processor').first().json.sessionId,\n    fromCache: true,\n    timestamp: new Date().toISOString(),\n    cacheHit: true\n  }\n}];"
+      },
+      "id": "format_cached",
+      "name": "Format Cached Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-600, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Format final response\nconst responseData = $json;\nconst isAppointment = responseData.hasAppointmentIntent || false;\nconst appointmentData = $('save_appointment_db').first()?.json || null;\n\nlet finalResponse = {\n  success: true,\n  response: responseData.response,\n  language: responseData.language,\n  sessionId: responseData.sessionId,\n  timestamp: responseData.timestamp || new Date().toISOString(),\n  fromCache: responseData.fromCache || false\n};\n\nif (isAppointment && appointmentData) {\n  finalResponse.appointmentCreated = true;\n  finalResponse.appointmentDetails = {\n    eventId: appointmentData.event_id,\n    startTime: appointmentData.start_time,\n    endTime: appointmentData.end_time,\n    type: appointmentData.appointment_type\n  };\n  \n  // Add appointment confirmation to response\n  const confirmationMessages = {\n    pt: `\\n\\nAgendamento confirmado para ${new Date(appointmentData.start_time).toLocaleDateString('pt-PT')} às ${new Date(appointmentData.start_time).toLocaleTimeString('pt-PT', {hour: '2-digit', minute:'2-digit'})}. Enviámos um email de confirmação.`,\n    en: `\\n\\nAppointment confirmed for ${new Date(appointmentData.start_time).toLocaleDateString('en-US')} at ${new Date(appointmentData.start_time).toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit'})}. We've sent a confirmation email.`\n  };\n  \n  finalResponse.response += confirmationMessages[responseData.language] || confirmationMessages.en;\n}\n\nreturn [{\n  json: finalResponse\n}];"
+      },
+      "id": "format_final_response",
+      "name": "Format Final Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2600, 400]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle empty message error\nconst lang = $json.preferredLanguage || 'pt';\n\nconst errorMessages = {\n  pt: 'Por favor, escreva uma mensagem.',\n  en: 'Please write a message.'\n};\n\nreturn [{\n  json: {\n    success: false,\n    error: true,\n    errorType: 'empty_message',\n    response: errorMessages[lang] || errorMessages.pt,\n    language: lang,\n    sessionId: $json.sessionId,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "empty_message_handler",
+      "name": "Empty Message Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1400, 500]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Handle general errors\nconst previousData = $('session_processor').first()?.json || {};\nconst lang = previousData.detectedLanguage || 'pt';\n\nconst errorMessages = {\n  pt: 'Peço desculpa, ocorreu um erro. Por favor, tente novamente.',\n  en: 'I apologize, an error occurred. Please try again.'\n};\n\nreturn [{\n  json: {\n    success: false,\n    error: true,\n    errorType: 'processing_error',\n    response: errorMessages[lang] || errorMessages.pt,\n    language: lang,\n    sessionId: previousData.sessionId || 'error',\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "error_handler",
+      "name": "General Error Handler",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [600, 600],
+      "executeOnce": true
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "responseCode": 200,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "name": "Access-Control-Allow-Origin",
+                "value": "*"
+              }
+            ]
+          }
+        }
+      },
+      "id": "respond_webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2800, 400]
+    },
+    {
+      "parameters": {
+        "triggerTimes": {
+          "item": [
+            {
+              "hour": 9,
+              "minute": 0
+            }
+          ]
+        }
+      },
+      "id": "reminder_cron",
+      "name": "Daily Reminder Schedule",
+      "type": "n8n-nodes-base.cron",
+      "typeVersion": 1,
+      "position": [-1800, 800]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare date range for tomorrow's appointments\nconst now = new Date();\nconst tomorrow = new Date(now);\ntomorrow.setDate(tomorrow.getDate() + 1);\ntomorrow.setHours(0, 0, 0, 0);\n\nconst dayAfter = new Date(tomorrow);\ndayAfter.setDate(dayAfter.getDate() + 1);\n\nreturn [{\n  json: {\n    tomorrowStart: tomorrow.toISOString(),\n    tomorrowEnd: dayAfter.toISOString()\n  }\n}];"
+      },
+      "id": "prepare_reminder_dates",
+      "name": "Prepare Reminder Dates",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1600, 800]
+    },
+    {
+      "parameters": {
+        "url": "=http://10.52.0.1:8000/rest/v1/appointments?start_time=gte.{{ $json.tomorrowStart }}&start_time=lt.{{ $json.tomorrowEnd }}&status=eq.pending",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "fetch_tomorrow_appointments",
+      "name": "Fetch Tomorrow's Appointments",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-1400, 800]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "process_reminders",
+      "name": "Process Each Appointment",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-1200, 800]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Prepare reminder email\nconst appointment = $json;\nconst lang = appointment.language || 'pt';\n\nconst reminderTemplates = {\n  pt: {\n    subject: `Lembrete: Agendamento Amanhã - AIQUIMIA`,\n    text: `Olá ${appointment.attendee_name},\\n\\nEste é um lembrete do seu agendamento amanhã:\\n\\nData: ${new Date(appointment.start_time).toLocaleDateString('pt-PT')}\\nHora: ${new Date(appointment.start_time).toLocaleTimeString('pt-PT', {hour: '2-digit', minute:'2-digit'})}\\nTipo: ${appointment.appointment_type}\\n\\nAguardamos por si!\\n\\nEquipa AIQUIMIA`\n  },\n  en: {\n    subject: `Reminder: Appointment Tomorrow - AIQUIMIA`,\n    text: `Hello ${appointment.attendee_name},\\n\\nThis is a reminder of your appointment tomorrow:\\n\\nDate: ${new Date(appointment.start_time).toLocaleDateString('en-US')}\\nTime: ${new Date(appointment.start_time).toLocaleTimeString('en-US', {hour: '2-digit', minute:'2-digit'})}\\nType: ${appointment.appointment_type}\\n\\nWe look forward to seeing you!\\n\\nAIQUIMIA Team`\n  }\n};\n\nconst template = reminderTemplates[lang] || reminderTemplates.pt;\n\nreturn [{\n  json: {\n    ...appointment,\n    emailSubject: template.subject,\n    emailText: template.text\n  }\n}];"
+      },
+      "id": "prepare_reminder",
+      "name": "Prepare Reminder Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-1000, 800]
+    },
+    {
+      "parameters": {
+        "fromEmail": "reminders@aiquimia.ai",
+        "toEmail": "={{ $json.attendee_email }}",
+        "subject": "={{ $json.emailSubject }}",
+        "text": "={{ $json.emailText }}",
+        "options": {}
+      },
+      "id": "send_reminder",
+      "name": "Send Reminder Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [-800, 800],
+      "credentials": {
+        "smtp": {
+          "id": "smtp_creds",
+          "name": "SMTP Credentials"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=http://10.52.0.1:8000/rest/v1/appointments?event_id=eq.{{ $json.event_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJhbm9uIiwKICAgICJpc3MiOiAic3VwYWJhc2UtZGVtbyIsCiAgICAiaWF0IjogMTY0MTc2OTIwMCwKICAgICJleHAiOiAxNzk5NTM1NjAwCn0.dc_X5iR_VP_qT0zsiyj_I_OZ2T9FtRU2BBNWN8Bu4GE"
+            },
+            {
+              "name": "Authorization",
+              "value": "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyAgCiAgICAicm9sZSI6ICJzZXJ2aWNlX3JvbGUiLAogICAgImlzcyI6ICJzdXBhYmFzZS1kZW1vIiwKICAgICJpYXQiOiAxNjQxNzY5MjAwLAogICAgImV4cCI6IDE3OTk1MzU2MDAKfQ.DaYlNEoUrrEn2Ig7tqibS-PHK5vgusbcbo7X36XVt4Q"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"reminder_sent\": true,\n  \"reminder_sent_at\": \"{{ new Date().toISOString() }}\"\n}",
+        "options": {}
+      },
+      "id": "update_reminder_status",
+      "name": "Update Reminder Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-600, 800]
+    }
+  ],
+  "connections": {
+    "webhook_trigger": {
+      "main": [
+        [
+          {
+            "node": "security_validator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "security_validator": {
+      "main": [
+        [
+          {
+            "node": "language_detector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "language_detector": {
+      "main": [
+        [
+          {
+            "node": "session_processor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "session_processor": {
+      "main": [
+        [
+          {
+            "node": "redis_cache_check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "redis_cache_check": {
+      "main": [
+        [
+          {
+            "node": "cache_found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "cache_found": {
+      "main": [
+        [
+          {
+            "node": "format_cached",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "intent_classifier",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "ner_processor",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "meilisearch_kb",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "fetch_conversation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "intent_classifier": {
+      "main": [
+        [
+          {
+            "node": "prepare_llama_request",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "ner_processor": {
+      "main": [
+        [
+          {
+            "node": "prepare_llama_request",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "meilisearch_kb": {
+      "main": [
+        [
+          {
+            "node": "prepare_llama_request",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "fetch_conversation": {
+      "main": [
+        [
+          {
+            "node": "prepare_llama_request",
+            "type": "main",
+            "index": 4
+          }
+		  ]
+      ]
+    },
+    "prepare_llama_request": {
+      "main": [
+        [
+          {
+            "node": "llama_api",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "llama_api": {
+      "main": [
+        [
+          {
+            "node": "process_response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "error_handler",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process_response": {
+      "main": [
+        [
+          {
+            "node": "cache_response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "save_user_message",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "save_ai_response",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "check_appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "check_appointment": {
+      "main": [
+        [
+          {
+            "node": "extract_appointment",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "format_final_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "extract_appointment": {
+      "main": [
+        [
+          {
+            "node": "validate_appointment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "validate_appointment": {
+      "main": [
+        [
+          {
+            "node": "create_calendar_event",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "format_final_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "create_calendar_event": {
+      "main": [
+        [
+          {
+            "node": "save_to_nextcloud",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "save_appointment_db",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "save_appointment_db": {
+      "main": [
+        [
+          {
+            "node": "prepare_email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare_email": {
+      "main": [
+        [
+          {
+            "node": "send_confirmation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send_confirmation": {
+      "main": [
+        [
+          {
+            "node": "format_final_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format_cached": {
+      "main": [
+        [
+          {
+            "node": "format_final_response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "format_final_response": {
+      "main": [
+        [
+          {
+            "node": "respond_webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "empty_message_handler": {
+      "main": [
+        [
+          {
+            "node": "respond_webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "error_handler": {
+      "main": [
+        [
+          {
+            "node": "respond_webhook",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "reminder_cron": {
+      "main": [
+        [
+          {
+            "node": "prepare_reminder_dates",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "prepare_reminder_dates": {
+      "main": [
+        [
+          {
+            "node": "fetch_tomorrow_appointments",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "fetch_tomorrow_appointments": {
+      "main": [
+        [
+          {
+            "node": "process_reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "process_reminders": {
+      "main": [
+        [
+          {
+            "node": "prepare_reminder",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "prepare_reminder": {
+      "main": [
+        [
+          {
+            "node": "send_reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "send_reminder": {
+      "main": [
+        [
+          {
+            "node": "update_reminder_status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "update_reminder_status": {
+      "main": [
+        [
+          {
+            "node": "process_reminders",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "saveManualExecutions": true,
+    "executionTimeout": 300
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "aiquimia-lia-chatbot"
+  },
+  "tags": [
+    {
+      "name": "chatbot",
+      "createdAt": "2024-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "bilingual",
+      "createdAt": "2024-01-01T00:00:00.000Z"
+    },
+    {
+      "name": "production",
+      "createdAt": "2024-01-01T00:00:00.000Z"
+    }
+  ]
+}
